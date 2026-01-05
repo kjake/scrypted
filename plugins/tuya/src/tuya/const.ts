@@ -92,6 +92,7 @@ export type TuyaDeviceFunction = {
 
 export enum TuyaMessageProtocol {
   DEVICE = 4,
+  LEGACY = 20,
   OTHER = 30
 }
 
@@ -111,7 +112,7 @@ export type TuyaMessage = {
       status: (TuyaDeviceStatus & { t: number })[]
     }
   } | {
-    protocol: TuyaMessageProtocol.OTHER;
+    protocol: TuyaMessageProtocol.OTHER | TuyaMessageProtocol.LEGACY;
     data: {
       bizData: {
         devId: string;
