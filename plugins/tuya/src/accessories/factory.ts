@@ -9,6 +9,7 @@ export function createTuyaDevice(state: TuyaDevice, plugin: TuyaPlugin): TuyaAcc
   switch (state.category) {
     case "sp":
     case "dghsxj":
+    case "sp_wnq":
       return new TuyaCamera(state, plugin)
     default: return null;
   }
