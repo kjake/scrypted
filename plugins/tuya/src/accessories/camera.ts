@@ -118,7 +118,7 @@ export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCa
           codec: "h264",
         },
         audio: {
-          codec: "pcm_ulaw",
+          codec: "pcm_mulaw",
         },
         source: "cloud",
         tool: "ffmpeg",
@@ -139,7 +139,8 @@ export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCa
     const motionSchema = this.getSchema(...SCHEMA_CODE.MOTION_DETECT);
     if (this.getSchema(...SCHEMA_CODE.MOTION_ON) && motionSchema) {
       const motionStatus = statusArray.find(s => s.code === motionSchema.code);
-      motionStatus && motionStatus.value.toString().length > 1 && this.debounce(
+      const isNonTrivialString = (v: any) => typeof v === 'string' && v.length > 1;
+      motionStatus && isNonTrivialString(motionStatus.value) && this.debounce(
         motionSchema,
         10 * 1000,
         () => this.motionDetected = true,
@@ -150,7 +151,8 @@ export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCa
     const doorbellNotifSchema = this.getSchema(...SCHEMA_CODE.ALARM_MESSAGE, ...SCHEMA_CODE.DOORBELL_RING);
     if (this.getSchema(...SCHEMA_CODE.DOORBELL) && doorbellNotifSchema) {
       const doorbellStatus = statusArray.find(s => [...SCHEMA_CODE.ALARM_MESSAGE, ...SCHEMA_CODE.DOORBELL_RING].includes(s.code));
-      doorbellStatus && doorbellStatus.value.toString().length > 1 && this.debounce(
+      const isNonTrivialString = (v: any) => typeof v === 'string' && v.length > 1;
+      doorbellStatus && isNonTrivialString(doorbellStatus.value) && this.debounce(
         doorbellNotifSchema,
         10 * 1000,
         () => this.binaryState = true,
