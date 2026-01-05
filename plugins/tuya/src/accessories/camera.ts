@@ -55,7 +55,7 @@ export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCa
         motionSchema ? ScryptedInterface.MotionSensor : null,
         doorbellSchema ? ScryptedInterface.BinarySensor : null,
       ]
-      .filter((p): p is ScryptedInterface => !!p)
+        .filter((p): p is ScryptedInterface => !!p)
     }
   }
 
@@ -127,32 +127,33 @@ export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCa
   }
 
   async updateStatus(status: TuyaDeviceStatus[]): Promise<void> {
-    super.updateStatus(status);
+    const statusArray: TuyaDeviceStatus[] = Array.isArray(status) ? status : [];
+    await super.updateStatus(statusArray);
 
     const indicatorSchema = this.getSchema(...SCHEMA_CODE.INDICATOR);
     if (indicatorSchema) {
-      const indicatorStatus = status.find(s=> s.code === indicatorSchema.code);
+      const indicatorStatus = statusArray.find(s => s.code === indicatorSchema.code);
       indicatorStatus && (this.on = indicatorStatus.value === true)
     }
 
     const motionSchema = this.getSchema(...SCHEMA_CODE.MOTION_DETECT);
     if (this.getSchema(...SCHEMA_CODE.MOTION_ON) && motionSchema) {
-      const motionStatus = status.find(s=> s.code === motionSchema.code);
+      const motionStatus = statusArray.find(s => s.code === motionSchema.code);
       motionStatus && motionStatus.value.toString().length > 1 && this.debounce(
         motionSchema,
         10 * 1000,
-        () => this.motionDetected = true, 
+        () => this.motionDetected = true,
         () => this.motionDetected = false,
       )
     }
 
     const doorbellNotifSchema = this.getSchema(...SCHEMA_CODE.ALARM_MESSAGE, ...SCHEMA_CODE.DOORBELL_RING);
     if (this.getSchema(...SCHEMA_CODE.DOORBELL) && doorbellNotifSchema) {
-      const doorbellStatus = status.find(s => [...SCHEMA_CODE.ALARM_MESSAGE, ...SCHEMA_CODE.DOORBELL_RING].includes(s.code));
+      const doorbellStatus = statusArray.find(s => [...SCHEMA_CODE.ALARM_MESSAGE, ...SCHEMA_CODE.DOORBELL_RING].includes(s.code));
       doorbellStatus && doorbellStatus.value.toString().length > 1 && this.debounce(
         doorbellNotifSchema,
         10 * 1000,
-        () => this.binaryState = true, 
+        () => this.binaryState = true,
         () => this.binaryState = false
       );
     }
@@ -190,7 +191,7 @@ export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCa
         )
       }
 
-      const lightStatus = status.find(s=> s.code === lightSchema.code);
+      const lightStatus = statusArray.find(s => s.code === lightSchema.code);
       lightStatus && (this.lightAccessory.on = !!lightStatus.value);
     }
   }

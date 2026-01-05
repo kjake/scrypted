@@ -10,6 +10,7 @@ export function createTuyaDevice(state: TuyaDevice, plugin: TuyaPlugin): TuyaAcc
     case "sp":
     case "dghsxj":
     case "sp_wnq":
+    case "pettv":  
       return new TuyaCamera(state, plugin)
     default: return null;
   }

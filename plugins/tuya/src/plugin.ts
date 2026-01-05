@@ -253,19 +253,55 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
 
     const devices = await this.api.fetchDevices();
 
+    // Some Tuya endpoints return `status` in non-array shapes (or omit it).
+    for (const d of devices as any[]) {
+      const s = d?.status;
+
+      if (Array.isArray(s)) {
+        // ok
+      } else if (Array.isArray(s?.status)) {
+        // sometimes nested
+        d.status = s.status;
+      } else if (s && typeof s === 'object') {
+        // map -> array of { code, value }
+        d.status = Object.entries(s).map(([code, value]) => ({ code, value }));
+      } else {
+        d.status = [];
+      }
+
+      if (!Array.isArray(d.schema)) d.schema = [];
+      if (!d.id && (d as any).devId) d.id = (d as any).devId;
+
+      // Normalize status entries to { code, value }
+      d.status = (d.status as any[]).map(s => {
+        if (!s || typeof s !== 'object') return s;
+        return {
+          code: (s as any).code ?? (s as any).dpCode ?? (s as any).key,
+          value: (s as any).value,
+        };
+      }).filter(s => s?.code);
+    }
+
     this.devices = new Map(
-      devices.map(d => {
+      devices.flatMap(d => {
         const device = createTuyaDevice(d, this);
-        return !!device ? [d.id, device] : undefined
+        return device ? [[d.id, device] as [string, TuyaAccessory]] : [];
       })
-      .filter((p): p is [string, TuyaAccessory] => !!p)
     );
 
     await sdk.deviceManager.onDevicesChanged({
       devices: Array.from(this.devices.values()).map(d => ({ ...d.deviceSpecs, providerNativeId: this.nativeId }))
     });
 
-    this.devices.forEach(d => d.updateAllValues());
+    await Promise.all(Array.from(this.devices.values()).map(async (d) => {
+      try {
+        await d.updateAllValues();
+      } catch (e) {
+        this.console?.warn?.(
+          `[${this.name}] updateAllValues failed for ${d?.tuyaDevice?.name ?? d?.nativeId ?? 'unknown'}: ${e}`
+        );
+      }
+    }));
 
     try {
       if (this.api instanceof TuyaSharingAPI) {
@@ -277,9 +313,13 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
         this.mq = new TuyaMQ(fetch)
         this.mq.on("message", (mq, msg) => {
           const string = (msg as Buffer).toString('utf-8');
-          const obj = JSON.parse(string) as TuyaMessage;
-          if (!obj) return;
-          this.onMessage(obj);
+          try {
+            const obj = JSON.parse(string) as TuyaMessage;
+            if (!obj) return;
+            this.onMessage(obj);
+          } catch (e) {
+            this.console?.warn?.(`[${this.name}] Failed to parse MQTT message: ${e}`);
+          }
         });
         this.mq.on("error", (error) => {
           this.console.error(`[${this.name}] (${new Date().toLocaleString()}) failed to connect to mqtt, will retry.`, error)
@@ -295,16 +335,27 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     this.console.debug("Received new message", JSON.stringify(message));
     if (message.protocol === TuyaMessageProtocol.DEVICE) {
       const device = this.devices.get(message.data.devId);
-      device?.updateStatus(message.data.status)
+      void device?.updateStatus(message.data.status).catch((e) => {
+        this.console?.warn?.(`[${this.name}] updateStatus failed for ${message.data.devId}: ${e}`);
+      });
     } else if (message.protocol === TuyaMessageProtocol.OTHER || message.protocol === TuyaMessageProtocol.LEGACY) {
-      const device = this.devices.get(message.data.bizData.devId);
+      const devId = message.data?.bizData?.devId;
+      if (!devId) return;
+      const device = this.devices.get(devId);
       if (!device) return;
-      if (message.data.bizCode === "online" || message.data.bizCode === "offline") {
-        device.online = message.data.bizCode === "online";
-      } else if (message.data.bizCode === "delete") {
+      const bizCode = message.data?.bizCode;
+      if (!bizCode) return;
+      if (bizCode === "online" || bizCode === "offline") {
+        device.online = bizCode === "online";
+      } else if (bizCode === "delete") {
         // TODO: Remove device
-      } else if (message.data.bizCode === "nameUpdate") {
-        // TODO: update name
+      } else if (bizCode === "nameUpdate") {
+        const name = message.data.bizData?.name;
+        if (!name) return;
+        device.deviceSpecs.name = name;
+        void sdk.deviceManager.onDevicesChanged({
+          devices: Array.from(this.devices.values()).map(d => ({ ...d.deviceSpecs, providerNativeId: this.nativeId })),
+        });
       }
     } else {
       this.console.log("Unknown message received.", message);
