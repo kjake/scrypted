@@ -296,7 +296,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     if (message.protocol === TuyaMessageProtocol.DEVICE) {
       const device = this.devices.get(message.data.devId);
       device?.updateStatus(message.data.status)
-    } else if (message.protocol === TuyaMessageProtocol.OTHER) {
+    } else if (message.protocol === TuyaMessageProtocol.OTHER || message.protocol === TuyaMessageProtocol.LEGACY) {
       const device = this.devices.get(message.data.bizData.devId);
       if (!device) return;
       if (message.data.bizCode === "online" || message.data.bizCode === "offline") {
