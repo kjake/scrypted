@@ -9,7 +9,13 @@ export function createTuyaDevice(state: TuyaDevice, plugin: TuyaPlugin): TuyaAcc
   switch (state.category) {
     case "sp":
     case "dghsxj":
-      return new TuyaCamera(state, plugin)
-    default: return null;
+    case "ipc":
+    case "sp_wnq":
+      return new TuyaCamera(state, plugin);
+    default:
+      plugin.console.log(
+        `[Tuya] Unhandled device "${state.name}" (${state.id}) category="${state.category}" product="${state.product_name}".`
+      );
+      return null;
   }
 }
