@@ -12,7 +12,7 @@ import { StorageSettings } from "@scrypted/sdk/storage-settings";
 
 import QRCode from "qrcode-svg";
 
-import { TuyaLoginMethod, TuyaMessage, TuyaMessageProtocol, TuyaTokenInfo } from "./tuya/const";
+import { TuyaDevice, TuyaLoginMethod, TuyaMessage, TuyaMessageProtocol, TuyaTokenInfo } from "./tuya/const";
 import { TuyaLoginQRCode, TuyaSharingAPI } from "./tuya/sharing";
 import { TuyaAccessory } from "./accessories/accessory";
 import { TuyaCloudAPI } from "./tuya/cloud";
@@ -20,11 +20,18 @@ import { TUYA_COUNTRIES } from "./tuya/deprecated";
 import { TuyaPulsarMessage } from "./tuya/pulsar";
 import { createTuyaDevice } from "./accessories/factory";
 import { TuyaMQ } from "./tuya/mq";
+import { DiscoveryController } from "./discovery/controller";
+import { DiscoveryRegistry } from "./discovery/registry";
+import { DiscoveryState } from "./discovery/types";
+import { NetRtspValidator } from "./discovery/rtspValidator";
 
 export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Settings {
   api: TuyaSharingAPI | TuyaCloudAPI | undefined;
   mq: TuyaMQ | undefined;
   devices = new Map<string, TuyaAccessory>();
+  tuyaDevices = new Map<string, TuyaDevice>();
+  discoveryRegistry = new DiscoveryRegistry(this.storage);
+  discoveryController: DiscoveryController | undefined;
 
   settingsStorage = new StorageSettings(this, {
     loginMethod: {
@@ -282,8 +289,55 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
       }).filter(s => s?.code);
     }
 
+    devices.forEach((device) => {
+      this.discoveryRegistry.upsertCandidate(
+        {
+          devId: device.id,
+          name: device.name,
+          category: device.category,
+          productId: device.product_id,
+          icon: device.icon,
+        },
+        device.online,
+      );
+    });
+
+    this.discoveryController = new DiscoveryController(
+      this.discoveryRegistry,
+      new NetRtspValidator(),
+      async (devId: string) => {
+        if (!this.api) {
+          throw new Error("Not authenticated with Tuya.");
+        }
+        const token = await this.api.getRTSP(devId);
+        return token.url;
+      },
+      {
+        maxConcurrent: 2,
+        debounceMs: 10_000,
+        backoffBaseMs: 15_000,
+        backoffMaxMs: 10 * 60_000,
+        onVerified: (devId: string) => {
+          void this.upsertScryptedDevice(devId);
+        },
+      },
+      this.console,
+    );
+
+    this.tuyaDevices = new Map(devices.map(device => [device.id, device]));
+
+    this.discoveryRegistry.getRecords().forEach((record) => {
+      if (record.online) {
+        this.discoveryController?.scheduleProbe(record.devId, { immediate: true });
+      }
+    });
+
     this.devices = new Map(
       devices.flatMap(d => {
+        const state = this.discoveryRegistry.getState(d.id);
+        if (state !== DiscoveryState.Verified && state !== DiscoveryState.Unverified) {
+          return [];
+        }
         const device = createTuyaDevice(d, this);
         return device ? [[d.id, device] as [string, TuyaAccessory]] : [];
       })
@@ -331,6 +385,27 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     }
   }
 
+  private async upsertScryptedDevice(devId: string): Promise<void> {
+    if (this.devices.has(devId)) return;
+    const tuyaDevice = this.tuyaDevices.get(devId);
+    if (!tuyaDevice) return;
+    const device = createTuyaDevice(tuyaDevice, this);
+    if (!device) return;
+    this.devices.set(devId, device);
+
+    await sdk.deviceManager.onDevicesChanged({
+      devices: Array.from(this.devices.values()).map(d => ({ ...d.deviceSpecs, providerNativeId: this.nativeId })),
+    });
+
+    try {
+      await device.updateAllValues();
+    } catch (e) {
+      this.console?.warn?.(
+        `[${this.name}] updateAllValues failed for ${device?.tuyaDevice?.name ?? device?.nativeId ?? 'unknown'}: ${e}`
+      );
+    }
+  }
+
   private onMessage(message: TuyaMessage) {
     this.console.debug("Received new message", JSON.stringify(message));
     if (message.protocol === TuyaMessageProtocol.DEVICE) {
@@ -342,14 +417,21 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
       const devId = message.data?.bizData?.devId;
       if (!devId) return;
       const device = this.devices.get(devId);
-      if (!device) return;
       const bizCode = message.data?.bizCode;
       if (!bizCode) return;
       if (bizCode === "online" || bizCode === "offline") {
-        device.online = bizCode === "online";
+        const isOnline = bizCode === "online";
+        if (device) {
+          device.online = isOnline;
+        }
+        this.discoveryRegistry.updateOnline(devId, isOnline);
+        if (isOnline) {
+          this.discoveryController?.scheduleProbe(devId);
+        }
       } else if (bizCode === "delete") {
         // TODO: Remove device
       } else if (bizCode === "nameUpdate") {
+        if (!device) return;
         const name = message.data.bizData?.name;
         if (!name) return;
         device.deviceSpecs.name = name;
