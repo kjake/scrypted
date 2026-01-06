@@ -14,7 +14,7 @@ export type DiscoveryControllerOptions = {
 };
 
 export class DiscoveryController {
-  private pending = new Set<string>();
+  private pending = new Map<string, boolean>();
   private queue: string[] = [];
   private inFlight = 0;
   private timers = new Map<string, NodeJS.Timeout>();
@@ -49,21 +49,27 @@ export class DiscoveryController {
   }
 
   private enqueueProbe(devId: string, force?: boolean): void {
-    if (this.pending.has(devId)) return;
-    this.pending.add(devId);
+    if (this.pending.has(devId)) {
+      if (force) {
+        this.pending.set(devId, true);
+      }
+      return;
+    }
+    this.pending.set(devId, !!force);
     this.queue.push(devId);
-    this.drainQueue(force);
+    this.drainQueue();
   }
 
-  private drainQueue(force?: boolean): void {
+  private drainQueue(): void {
     while (this.inFlight < this.options.maxConcurrent && this.queue.length > 0) {
       const devId = this.queue.shift();
       if (!devId) continue;
+      const force = this.pending.get(devId);
       this.pending.delete(devId);
       this.inFlight += 1;
       void this.runProbe(devId, force).finally(() => {
         this.inFlight -= 1;
-        this.drainQueue(force);
+        this.drainQueue();
       });
     }
   }

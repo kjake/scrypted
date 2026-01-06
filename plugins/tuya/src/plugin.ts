@@ -487,6 +487,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
   } {
     this.discoveryChoiceMap.clear();
     const devIdToLabel = new Map<string, string>();
+    const labelCounts = new Map<string, number>();
     const choices: string[] = [];
     const selectableRecords = records.filter(
       record => record.state === DiscoveryState.Candidate || record.state === DiscoveryState.Unverified,
@@ -496,7 +497,10 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
       const stateLabel = record.state === DiscoveryState.Unverified ? "Force confirmed" : "Candidate";
       const statusLabel = record.online === false ? "Offline" : "Online";
       const name = record.identity?.name || "Unknown device";
-      const label = `${name} (${stateLabel}, ${statusLabel}, ${this.redactDevId(record.devId)})`;
+      const baseLabel = `${name} (${stateLabel}, ${statusLabel}, ${this.redactDevId(record.devId)})`;
+      const count = labelCounts.get(baseLabel) ?? 0;
+      labelCounts.set(baseLabel, count + 1);
+      const label = count > 0 ? `${baseLabel} #${count + 1}` : baseLabel;
       choices.push(label);
       this.discoveryChoiceMap.set(label, record.devId);
       devIdToLabel.set(record.devId, label);
