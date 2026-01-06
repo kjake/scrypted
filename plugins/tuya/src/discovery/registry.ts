@@ -107,6 +107,22 @@ export class DiscoveryRegistry {
     this.persist();
   }
 
+  resetToCandidate(devId: string): void {
+    const record = this.records.get(devId);
+    if (!record) return;
+    record.state = DiscoveryState.Candidate;
+    record.probe = this.createProbeState();
+    record.lastFailure = undefined;
+    this.records.set(devId, record);
+    this.persist();
+  }
+
+  removeRecord(devId: string): void {
+    if (!this.records.has(devId)) return;
+    this.records.delete(devId);
+    this.persist();
+  }
+
   private createProbeState(): ProbeState {
     return {
       failureCount: 0,

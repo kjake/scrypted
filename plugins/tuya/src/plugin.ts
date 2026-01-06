@@ -25,6 +25,17 @@ import { DiscoveryRegistry } from "./discovery/registry";
 import { DiscoveryState } from "./discovery/types";
 import { NetRtspValidator } from "./discovery/rtspValidator";
 
+const DISCOVERY_GROUP = "Camera Discovery";
+const DISCOVERY_SELECTED_STORAGE_KEY = "tuya.discovery.selected";
+const DISCOVERY_DIAGNOSTICS_STORAGE_KEY = "tuya.discovery.diagnostics";
+const DISCOVERY_SETTING_SELECTED = "discovery.selected";
+const DISCOVERY_SETTING_RETRY_SELECTED = "discovery.retrySelected";
+const DISCOVERY_SETTING_FORCE_CONFIRM = "discovery.forceConfirmSelected";
+const DISCOVERY_SETTING_REMOVE_SELECTED = "discovery.removeSelected";
+const DISCOVERY_SETTING_RETRY_ALL = "discovery.retryAll";
+const DISCOVERY_SETTING_EXPORT = "discovery.export";
+const DISCOVERY_SETTING_DIAGNOSTICS = "discovery.diagnostics";
+
 export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Settings {
   api: TuyaSharingAPI | TuyaCloudAPI | undefined;
   mq: TuyaMQ | undefined;
@@ -32,6 +43,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
   tuyaDevices = new Map<string, TuyaDevice>();
   discoveryRegistry = new DiscoveryRegistry(this.storage);
   discoveryController: DiscoveryController | undefined;
+  private discoveryChoiceMap = new Map<string, string>();
 
   settingsStorage = new StorageSettings(this, {
     loginMethod: {
@@ -143,10 +155,14 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     this.settingsStorage.settings.accessId.hide = loginMethod != TuyaLoginMethod.Account;
     this.settingsStorage.settings.accessKey.hide = loginMethod != TuyaLoginMethod.Account;
     this.settingsStorage.settings.country.hide = loginMethod != TuyaLoginMethod.Account;
-    return await this.settingsStorage.getSettings();
+    const baseSettings = await this.settingsStorage.getSettings();
+    return [...baseSettings, ...this.getDiscoverySettings()];
   }
 
   async putSetting(key: string, value: string): Promise<void> {
+    if (this.handleDiscoverySetting(key, value)) {
+      return;
+    }
     return this.settingsStorage.putSetting(key, value);
   }
 
@@ -383,6 +399,241 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     } catch {
       this.console.log(`[${this.name}] (${new Date().toLocaleString()}) Failed to connect to Mqtt. Will not observe live changes to devices.`);
     }
+  }
+
+  private getDiscoverySettings(): Setting[] {
+    const records = this.discoveryRegistry.getRecords();
+    const counts = {
+      verified: records.filter(r => r.state === DiscoveryState.Verified).length,
+      unverified: records.filter(r => r.state === DiscoveryState.Unverified).length,
+      candidates: records.filter(r => r.state === DiscoveryState.Candidate).length,
+      offline: records.filter(r => r.online === false).length,
+    };
+
+    const summary = `Verified: ${counts.verified} • Force confirmed: ${counts.unverified} • Candidates: ${counts.candidates} • Offline: ${counts.offline}`;
+
+    const { choices, selectedLabel } = this.buildDiscoveryChoiceLabels(records);
+    const diagnostics = this.storage.getItem(DISCOVERY_DIAGNOSTICS_STORAGE_KEY) ?? "";
+
+    const selectionSetting: Setting = {
+      key: DISCOVERY_SETTING_SELECTED,
+      group: DISCOVERY_GROUP,
+      title: "Candidate Device",
+      description: choices.length
+        ? "Choose a candidate or force-confirmed device to manage."
+        : "No candidates available.",
+      choices,
+      value: selectedLabel,
+    };
+
+    return [
+      {
+        key: "discovery.summary",
+        group: DISCOVERY_GROUP,
+        title: "Discovery Summary",
+        readonly: true,
+        value: summary,
+      },
+      selectionSetting,
+      {
+        key: DISCOVERY_SETTING_RETRY_SELECTED,
+        group: DISCOVERY_GROUP,
+        title: "Retry Selected",
+        type: "button",
+        description: "Retry validation for the selected device.",
+      },
+      {
+        key: DISCOVERY_SETTING_FORCE_CONFIRM,
+        group: DISCOVERY_GROUP,
+        title: "Force Confirm Selected",
+        type: "button",
+        description: "Allow the selected device without validation.",
+      },
+      {
+        key: DISCOVERY_SETTING_REMOVE_SELECTED,
+        group: DISCOVERY_GROUP,
+        title: "Remove/Unconfirm Selected",
+        type: "button",
+        description: "Remove the candidate or unconfirm a force-confirmed device.",
+      },
+      {
+        key: DISCOVERY_SETTING_RETRY_ALL,
+        group: DISCOVERY_GROUP,
+        title: "Retry Discovery Now",
+        type: "button",
+        description: "Retry validation for all candidates.",
+      },
+      {
+        key: DISCOVERY_SETTING_EXPORT,
+        group: DISCOVERY_GROUP,
+        title: "Export Diagnostics",
+        type: "button",
+        description: "Generate a redacted diagnostics snapshot.",
+      },
+      {
+        key: DISCOVERY_SETTING_DIAGNOSTICS,
+        group: DISCOVERY_GROUP,
+        title: "Diagnostics (JSON)",
+        type: "textarea",
+        readonly: true,
+        value: diagnostics,
+      },
+    ];
+  }
+
+  private buildDiscoveryChoiceLabels(records: ReturnType<DiscoveryRegistry["getRecords"]>): {
+    choices: string[];
+    selectedLabel?: string;
+  } {
+    this.discoveryChoiceMap.clear();
+    const devIdToLabel = new Map<string, string>();
+    const choices: string[] = [];
+    const selectableRecords = records.filter(
+      record => record.state === DiscoveryState.Candidate || record.state === DiscoveryState.Unverified,
+    );
+
+    for (const record of selectableRecords) {
+      const stateLabel = record.state === DiscoveryState.Unverified ? "Force confirmed" : "Candidate";
+      const statusLabel = record.online === false ? "Offline" : "Online";
+      const name = record.identity?.name || "Unknown device";
+      const label = `${name} (${stateLabel}, ${statusLabel}, ${this.redactDevId(record.devId)})`;
+      choices.push(label);
+      this.discoveryChoiceMap.set(label, record.devId);
+      devIdToLabel.set(record.devId, label);
+    }
+
+    const selectedDevId = this.storage.getItem(DISCOVERY_SELECTED_STORAGE_KEY);
+    const selectedLabel = selectedDevId ? devIdToLabel.get(selectedDevId) : undefined;
+
+    return { choices, selectedLabel };
+  }
+
+  private handleDiscoverySetting(key: string, value: string): boolean {
+    if (key === DISCOVERY_SETTING_SELECTED) {
+      const devId = this.discoveryChoiceMap.get(value);
+      if (devId) {
+        this.storage.setItem(DISCOVERY_SELECTED_STORAGE_KEY, devId);
+      } else {
+        this.storage.removeItem(DISCOVERY_SELECTED_STORAGE_KEY);
+      }
+      this.onDeviceEvent(ScryptedInterface.Settings, undefined);
+      return true;
+    }
+
+    if (key === DISCOVERY_SETTING_RETRY_SELECTED) {
+      const devId = this.storage.getItem(DISCOVERY_SELECTED_STORAGE_KEY);
+      if (devId && this.discoveryController) {
+        this.discoveryController.scheduleProbe(devId, { immediate: true, force: true });
+      }
+      return true;
+    }
+
+    if (key === DISCOVERY_SETTING_FORCE_CONFIRM) {
+      const devId = this.storage.getItem(DISCOVERY_SELECTED_STORAGE_KEY);
+      if (devId && this.discoveryController) {
+        this.discoveryController.forceConfirm(devId);
+        void this.upsertScryptedDevice(devId);
+        this.onDeviceEvent(ScryptedInterface.Settings, undefined);
+      }
+      return true;
+    }
+
+    if (key === DISCOVERY_SETTING_REMOVE_SELECTED) {
+      const devId = this.storage.getItem(DISCOVERY_SELECTED_STORAGE_KEY);
+      if (!devId) return true;
+      const record = this.discoveryRegistry.getRecord(devId);
+      if (!record) return true;
+      if (record.state === DiscoveryState.Candidate) {
+        this.discoveryRegistry.removeRecord(devId);
+      } else {
+        this.discoveryRegistry.resetToCandidate(devId);
+        void this.removeScryptedDevice(devId);
+      }
+      this.onDeviceEvent(ScryptedInterface.Settings, undefined);
+      return true;
+    }
+
+    if (key === DISCOVERY_SETTING_RETRY_ALL) {
+      if (this.discoveryController) {
+        this.discoveryRegistry.getRecords().forEach(record => {
+          if (record.state === DiscoveryState.Verified) return;
+          this.discoveryController?.scheduleProbe(record.devId, { immediate: true });
+        });
+      }
+      return true;
+    }
+
+    if (key === DISCOVERY_SETTING_EXPORT) {
+      const diagnostics = this.buildDiscoveryDiagnostics();
+      this.storage.setItem(DISCOVERY_DIAGNOSTICS_STORAGE_KEY, diagnostics);
+      this.onDeviceEvent(ScryptedInterface.Settings, undefined);
+      return true;
+    }
+
+    if (key === DISCOVERY_SETTING_DIAGNOSTICS) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private buildDiscoveryDiagnostics(): string {
+    const snapshot = {
+      generatedAt: new Date().toISOString(),
+      summary: {
+        verified: 0,
+        forceConfirmed: 0,
+        candidates: 0,
+        offline: 0,
+      },
+      records: [] as Array<Record<string, unknown>>,
+    };
+
+    for (const record of this.discoveryRegistry.getRecords()) {
+      if (record.state === DiscoveryState.Verified) snapshot.summary.verified += 1;
+      if (record.state === DiscoveryState.Unverified) snapshot.summary.forceConfirmed += 1;
+      if (record.state === DiscoveryState.Candidate) snapshot.summary.candidates += 1;
+      if (record.online === false) snapshot.summary.offline += 1;
+
+      snapshot.records.push({
+        devId: this.redactDevId(record.devId),
+        name: record.identity?.name,
+        category: record.identity?.category,
+        productId: record.identity?.productId,
+        state: record.state,
+        online: record.online,
+        probe: {
+          lastProbeAt: record.probe?.lastProbeAt,
+          lastSuccessAt: record.probe?.lastSuccessAt,
+          failureCount: record.probe?.failureCount,
+          backoffUntil: record.probe?.backoffUntil,
+        },
+        lastFailure: record.lastFailure
+          ? {
+              time: record.lastFailure.time,
+              statusCode: record.lastFailure.statusCode,
+              message: record.lastFailure.message,
+            }
+          : undefined,
+      });
+    }
+
+    return JSON.stringify(snapshot, null, 2);
+  }
+
+  private redactDevId(devId: string): string {
+    if (!devId) return "";
+    if (devId.length <= 4) return devId;
+    const suffixLength = devId.length <= 6 ? devId.length : 6;
+    return `…${devId.slice(-suffixLength)}`;
+  }
+
+  private async removeScryptedDevice(devId: string): Promise<void> {
+    if (!this.devices.has(devId)) return;
+    this.devices.delete(devId);
+    await sdk.deviceManager.onDevicesChanged({
+      devices: Array.from(this.devices.values()).map(d => ({ ...d.deviceSpecs, providerNativeId: this.nativeId })),
+    });
   }
 
   private async upsertScryptedDevice(devId: string): Promise<void> {
