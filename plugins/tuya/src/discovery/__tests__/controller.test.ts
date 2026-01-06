@@ -97,4 +97,46 @@ describe("DiscoveryController transitions", () => {
 
     expect(registry.getState("device-2")).toBe(DiscoveryState.Verified);
   });
+
+  it("does not apply force probes to other queued devices", async () => {
+    const registry = new DiscoveryRegistry(new MemoryStorage());
+    registry.upsertCandidate({
+      devId: "device-3",
+      name: "Camera 3",
+      category: "camera",
+      productId: "prod",
+    });
+    registry.upsertCandidate({
+      devId: "device-4",
+      name: "Camera 4",
+      category: "camera",
+      productId: "prod",
+    });
+    registry.markVerified("device-4", Date.now());
+
+    const validator: RtspValidator = {
+      validate: vi.fn().mockResolvedValue({ ok: true, statusCode: 200 }),
+    };
+    const getStreamUrl = vi.fn().mockResolvedValue("rtsp://example.com/stream");
+
+    const controller = new DiscoveryController(
+      registry,
+      validator,
+      getStreamUrl,
+      {
+        maxConcurrent: 1,
+        debounceMs: 0,
+        backoffBaseMs: 1000,
+        backoffMaxMs: 10000,
+      },
+      console,
+    );
+
+    controller.scheduleProbe("device-3", { immediate: true, force: true });
+    controller.scheduleProbe("device-4", { immediate: true });
+    await vi.runAllTimersAsync();
+
+    expect(getStreamUrl).toHaveBeenCalledTimes(1);
+    expect(getStreamUrl).toHaveBeenCalledWith("device-3");
+  });
 });
