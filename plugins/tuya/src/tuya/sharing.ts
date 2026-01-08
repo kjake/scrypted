@@ -1,6 +1,7 @@
 import { Axios, Method } from "axios";
 import { RTSPToken, TuyaDevice, TuyaDeviceFunction, TuyaDeviceSchema, TuyaDeviceStatus, TuyaResponse } from "./const";
 import { TuyaWebRtcConfig } from "./webrtc";
+import { getEndPointWithCountryName } from "./deprecated";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomInt, randomUUID } from "node:crypto";
 import { MqttConfig } from "./mq";
 
@@ -288,20 +289,28 @@ export class TuyaSharingAPI {
     this.updateToken(this.tokenInfo);
   }
 
-  static async generateQRCode(userCode: string): Promise<TuyaLoginQRCode> {
-    const session = new Axios({})
+  static async generateQRCode(userCode: string, countryName?: string): Promise<TuyaLoginQRCode> {
+    const endpoint = getEndPointWithCountryName(countryName ?? "United States");
+    const host = new URL(endpoint).host;
+    const session = new Axios({ baseURL: `https://${host}` });
     const response = await session.request({
       method: "POST",
-      url: 'https://apigw.iotbing.com/v1.0/m/life/home-assistant/qrcode/tokens',
-      params: {
-        clientid: TuyaSharingAPI.clientId,
-        usercode: userCode,
-        schema: "haauthorize"
+      url: "/api/login/security/QCtoken",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Accept: "*/*",
+        Origin: `https://${host}`,
+        Referer: `https://${host}/login`,
+        "X-Requested-With": "XMLHttpRequest",
       },
-      headers: {}
     });
-    const data = JSON.parse(response.data) as TuyaResponse<{ qrcode: string }>;
-    if (!data.success) throw Error('Failed to fetch qr code with user code.');
+    const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
+    if (!raw?.success) throw Error(raw?.errorMsg || "Failed to fetch qr code with user code.");
+    const data: TuyaResponse<{ qrcode: string }> = {
+      success: raw.success,
+      t: raw.t,
+      result: { qrcode: raw.result },
+    };
     return { userCode, ...data }
   }
 

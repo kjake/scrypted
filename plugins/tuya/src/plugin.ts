@@ -211,7 +211,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
           } else if (!qrCodeValue || qrCodeValue.userCode != userCode) {
             this.settingsStorage.settings.qrCode.defaultValue = undefined;
             try {
-              const qrCode = await TuyaSharingAPI.generateQRCode(userCode);
+              const qrCode = await TuyaSharingAPI.generateQRCode(userCode, this.settingsStorage.values.country);
               this.settingsStorage.settings.qrCode.defaultValue = qrCode;
             } catch (e) {
               this.console.log(`[${this.name}] (${new Date().toLocaleString()}) Failed to fetch new QR Code.`, e);
