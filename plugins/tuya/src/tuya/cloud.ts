@@ -8,6 +8,7 @@ import {
   TuyaDeviceFunction,
   TuyaDeviceSchema
 } from "./const";
+import { TuyaWebRtcConfig } from "./webrtc";
 import { randomBytes, createHmac, hash } from "node:crypto";
 
 /**
@@ -131,6 +132,10 @@ export class TuyaCloudAPI {
     } else {
       throw new Error(`Failed to retrieve RTSP for camera ID: ${cameraId}`)
     }
+  }
+
+  public async getWebRTCConfig(_: string): Promise<TuyaWebRtcConfig> {
+    throw new Error("WebRTC signaling is not available for the Tuya developer account login.");
   }
 
   // Tuya IoT Cloud Requests API

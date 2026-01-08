@@ -17,9 +17,17 @@ import sdk, {
   Device,
   ScryptedDeviceType,
   ScryptedInterface,
+  RTCAVSignalingSetup,
+  RTCSessionControl,
+  RTCSignalingChannel,
+  RTCSignalingOptions,
+  RTCSignalingSendIceCandidate,
+  RTCSignalingSession,
 } from "@scrypted/sdk";
+import { connectRTCSignalingClients } from "@scrypted/common/src/rtc-signaling";
 import { TuyaAccessory } from "./accessory";
 import { TuyaDeviceStatus } from "../tuya/const";
+import { TuyaWebRtcSignalingClient } from "../tuya/webrtc";
 
 // TODO: Allow setting motion info based on dp name?
 const SCHEMA_CODE = {
@@ -36,7 +44,38 @@ const SCHEMA_CODE = {
   INDICATOR: ["basic_indicator"]
 };
 
-export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCamera, BinarySensor, MotionSensor, OnOff {
+class TuyaRTCSessionControl implements RTCSessionControl {
+  constructor(private signaling: TuyaWebRtcSignalingClient) {}
+
+  async setPlayback(_: { audio: boolean; video: boolean }): Promise<void> {}
+
+  async getRefreshAt(): Promise<number | void> {
+    return undefined;
+  }
+
+  async extendSession(): Promise<void> {}
+
+  async endSession(): Promise<void> {
+    await this.signaling.disconnect();
+  }
+}
+
+function createTuyaOfferSetup(iceServers: RTCIceServer[]): RTCAVSignalingSetup {
+  return {
+    type: "offer",
+    configuration: {
+      iceServers,
+    },
+    audio: {
+      direction: "recvonly",
+    },
+    video: {
+      direction: "recvonly",
+    },
+  };
+}
+
+export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCamera, BinarySensor, MotionSensor, OnOff, RTCSignalingChannel {
   private lightAccessory: ScryptedDeviceBase | undefined;
 
   get deviceSpecs(): Device {
@@ -51,6 +90,7 @@ export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCa
         ...super.deviceSpecs.interfaces,
         ScryptedInterface.VideoCamera,
         ScryptedInterface.DeviceProvider,
+        ScryptedInterface.RTCSignalingChannel,
         indicatorSchema ? ScryptedInterface.OnOff : null,
         motionSchema ? ScryptedInterface.MotionSensor : null,
         doorbellSchema ? ScryptedInterface.BinarySensor : null,
@@ -124,6 +164,100 @@ export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCa
         tool: "ffmpeg",
       },
     ];
+  }
+
+  async startRTCSignalingSession(session: RTCSignalingSession): Promise<RTCSessionControl> {
+    if (!this.tuyaDevice.online) {
+      throw new Error(`Failed to stream ${this.name}: Camera is offline.`);
+    }
+
+    const signalingConfig = await this.plugin.getWebRTCSignalingConfig(this.tuyaDevice.id);
+    const signaling = new TuyaWebRtcSignalingClient(signalingConfig);
+    await signaling.connect();
+
+    let answerSdp = "";
+    let answerResolve: ((sdp: string) => void) | undefined;
+    let answerReject: ((error: Error) => void) | undefined;
+
+    const answerPromise = new Promise<string>((resolve, reject) => {
+      answerResolve = resolve;
+      answerReject = reject;
+    });
+
+    const options: RTCSignalingOptions = {
+      requiresOffer: true,
+      disableTrickle: false,
+    };
+
+    signaling.onAnswer = (answer) => {
+      answerResolve?.(answer.sdp);
+    };
+    signaling.onDisconnect = () => {
+      answerReject?.(new Error("Tuya signaling session ended."));
+    };
+    signaling.onError = (error) => {
+      answerReject?.(error);
+    };
+
+    const tuyaSession: RTCSignalingSession = {
+      __proxy_props: {
+        options,
+      },
+      options,
+      createLocalDescription: async (
+        type: "offer" | "answer",
+        _: RTCAVSignalingSetup,
+        sendIceCandidate?: RTCSignalingSendIceCandidate
+      ): Promise<RTCSessionDescriptionInit> => {
+        if (type !== "answer") {
+          throw new Error("Tuya cameras only support RTC answer.");
+        }
+
+        if (sendIceCandidate) {
+          signaling.onCandidate = (candidate) => {
+            sendIceCandidate({
+              candidate: candidate.candidate,
+              sdpMid: "0",
+              sdpMLineIndex: 0,
+            });
+          };
+        }
+
+        return {
+          type: "answer",
+          sdp: answerSdp,
+        };
+      },
+      setRemoteDescription: async (description: RTCSessionDescriptionInit) => {
+        if (!description.sdp) {
+          throw new Error("Missing RTC offer for Tuya WebRTC session.");
+        }
+
+        await signaling.sendOffer(description.sdp);
+        answerSdp = await answerPromise;
+      },
+      addIceCandidate: async (candidate: RTCIceCandidateInit) => {
+        if (!candidate.candidate) return;
+        await signaling.sendCandidate(candidate.candidate);
+      },
+      getOptions: async () => options,
+    };
+
+    const iceServers = signalingConfig.webrtc.p2pConfig.ices.map((ice) => ({
+      urls: ice.urls,
+      username: ice.username,
+      credential: ice.credential,
+    }));
+
+    await connectRTCSignalingClients(
+      this.console,
+      session,
+      createTuyaOfferSetup(iceServers),
+      tuyaSession,
+      {}
+    );
+
+    return new TuyaRTCSessionControl(signaling);
   }
 
   async updateStatus(status: TuyaDeviceStatus[]): Promise<void> {

@@ -1,5 +1,6 @@
 import { Axios, Method } from "axios";
 import { RTSPToken, TuyaDevice, TuyaDeviceFunction, TuyaDeviceSchema, TuyaDeviceStatus, TuyaResponse } from "./const";
+import { TuyaWebRtcConfig } from "./webrtc";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomInt, randomUUID } from "node:crypto";
 import { MqttConfig } from "./mq";
 
@@ -106,6 +107,19 @@ export class TuyaSharingAPI {
     }
   }
 
+  public async getWebRTCConfig(deviceId: string): Promise<TuyaWebRtcConfig> {
+    const host = this.getJarvisHost();
+    const response = await this.jarvisRequest<TuyaWebRtcConfig>(host, "/api/jarvis/config", {
+      devId: deviceId,
+      clientTraceId: randomUUID(),
+    });
+    return response;
+  }
+
+  public getUserId(): string {
+    return this.tokenInfo.uid;
+  }
+
   async queryHomes() {
     const response = await this._request<[{ uid: string, id: number, ownerId: string, name: string }]>("GET", "/v1.0/m/life/users/homes");
     return response?.result || [];
@@ -136,6 +150,37 @@ export class TuyaSharingAPI {
     }
     device.schema = Array.from(schemas.values());
     return device;
+  }
+
+  private getJarvisHost(): string {
+    try {
+      return new URL(this.tokenInfo.endpoint).host;
+    } catch {
+      return this.tokenInfo.endpoint.replace(/^https?:\\/\\//, "");
+    }
+  }
+
+  private async jarvisRequest<T = any>(host: string, path: string, data: Record<string, any>): Promise<T> {
+    const response = await this.session.request({
+      method: "POST",
+      baseURL: `https://${host}`,
+      url: path,
+      data: JSON.stringify(data),
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Accept: "*/*",
+        Origin: `https://${host}`,
+        Referer: `https://${host}/playback`,
+        "X-Requested-With": "XMLHttpRequest",
+        Authorization: `Bearer ${this.tokenInfo.accessToken}`,
+      },
+    });
+
+    const payload = JSON.parse(response.data) as { success?: boolean; result?: T; errorMsg?: string };
+    if (!payload?.success || !payload.result) {
+      throw new Error(payload?.errorMsg || "Failed to fetch WebRTC configuration.");
+    }
+    return payload.result;
   }
 
   private async _request<T = any>(

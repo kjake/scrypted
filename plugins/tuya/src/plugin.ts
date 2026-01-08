@@ -24,6 +24,7 @@ import { DiscoveryController } from "./discovery/controller";
 import { DiscoveryRegistry } from "./discovery/registry";
 import { DiscoveryState } from "./discovery/types";
 import { NetRtspValidator } from "./discovery/rtspValidator";
+import { TuyaWebRtcSignalingConfig } from "./tuya/webrtc";
 
 const DISCOVERY_GROUP = "Camera Discovery";
 const DISCOVERY_SELECTED_STORAGE_KEY = "tuya.discovery.selected";
@@ -41,6 +42,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
   mq: TuyaMQ | undefined;
   devices = new Map<string, TuyaAccessory>();
   tuyaDevices = new Map<string, TuyaDevice>();
+  tuyaHomeIds: string[] = [];
   discoveryRegistry = new DiscoveryRegistry(this.storage);
   discoveryController: DiscoveryController | undefined;
   private discoveryChoiceMap = new Map<string, string>();
@@ -386,7 +388,8 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
         const api = this.api;
         const fetch = async function() {
           const homes = await api.queryHomes();
-          return await api.fetchMqttConfig(homes.map(h => h.ownerId), devices.map(d => d.id));
+          this.tuyaHomeIds = homes.map(h => h.ownerId);
+          return await api.fetchMqttConfig(this.tuyaHomeIds, devices.map(d => d.id));
         }
         this.mq = new TuyaMQ(fetch)
         this.mq.on("message", (mq, msg) => {
@@ -407,6 +410,34 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     } catch {
       this.console.log(`[${this.name}] (${new Date().toLocaleString()}) Failed to connect to Mqtt. Will not observe live changes to devices.`);
     }
+  }
+
+  async getWebRTCSignalingConfig(deviceId: string): Promise<TuyaWebRtcSignalingConfig> {
+    if (!this.api) {
+      throw new Error("Not authenticated with Tuya.");
+    }
+    if (!(this.api instanceof TuyaSharingAPI)) {
+      throw new Error("WebRTC signaling requires Tuya App login.");
+    }
+    if (!this.tuyaHomeIds.length) {
+      const homes = await this.api.queryHomes();
+      this.tuyaHomeIds = homes.map(h => h.ownerId);
+    }
+
+    const webrtc = await this.api.getWebRTCConfig(deviceId);
+    const mqttConfig = await this.api.fetchMqttConfig(this.tuyaHomeIds, [deviceId]);
+
+    return {
+      deviceId,
+      webrtc,
+      mqtt: {
+        url: mqttConfig.url,
+        clientId: mqttConfig.clientId,
+        username: mqttConfig.username,
+        password: mqttConfig.password,
+        uid: this.api.getUserId(),
+      },
+    };
   }
 
   private getDiscoverySettings(): Setting[] {
