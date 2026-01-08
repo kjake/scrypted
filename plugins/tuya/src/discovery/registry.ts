@@ -1,4 +1,4 @@
-import { Storage } from "@scrypted/sdk";
+import Storage from "@scrypted/sdk";
 import { DiscoveryDeviceIdentity, DiscoveryRecord, DiscoveryState, FailureInfo, ProbeState } from "./types";
 
 const STORAGE_KEY = "tuya.discovery.registry";

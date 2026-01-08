@@ -10,6 +10,19 @@ export type DiscoveryControllerOptions = {
   debounceMs: number;
   backoffBaseMs: number;
   backoffMaxMs: number;
+
+  /**
+   * Additional Tuya device categories that should be treated as camera-likely for probing.
+   * Categories in this list are probed in addition to the built-in defaults.
+   */
+  cameraCategories?: string[];
+
+  /**
+   * If true, probes will be scheduled for all online devices (not recommended for large Tuya homes).
+   * Force/manual probes always bypass category filtering regardless of this flag.
+   */
+  probeAllCategories?: boolean;
+
   onVerified?: (devId: string) => void;
 };
 
@@ -27,15 +40,36 @@ export class DiscoveryController {
     private logger: Console,
   ) {}
 
+  private isProbeEligible(record: any, force?: boolean): boolean {
+    if (!record) return false;
+    if (force) return true;
+
+    // Always allow probes for force-confirmed/unverified devices when online.
+    if (record.state === DiscoveryState.Unverified) return true;
+
+    // Allow probing everything only when explicitly requested.
+    if (this.options.probeAllCategories) return true;
+
+    // Default: probe only camera-likely categories to avoid hammering Tuya for non-camera devices.
+    const defaults = ["sp", "sp_wnq", "dghsxj", "pettv"];
+    const allow = new Set<string>([...defaults, ...(this.options.cameraCategories ?? [])]);
+
+    const category = record.identity?.category;
+    return typeof category === "string" && allow.has(category);
+  }
+
   scheduleProbe(devId: string, options: { immediate?: boolean; force?: boolean } = {}): void {
     const record = this.registry.getRecord(devId);
     if (!record) return;
     if (!options.force && record.state === DiscoveryState.Verified) return;
     if (record.online === false) return;
 
+    // Only probe camera-likely devices by default. Manual/forced probes bypass this filter.
+    if (!this.isProbeEligible(record, options.force)) return;
+
     const now = Date.now();
     const backoffUntil = record.probe.backoffUntil ?? 0;
-    const delayFromBackoff = Math.max(0, backoffUntil - now);
+    const delayFromBackoff = options.force ? 0 : Math.max(0, backoffUntil - now);
     const delay = options.immediate ? 0 : Math.max(this.options.debounceMs, delayFromBackoff);
 
     const existing = this.timers.get(devId);
@@ -78,6 +112,7 @@ export class DiscoveryController {
     const record = this.registry.getRecord(devId);
     if (!record) return;
     if (!force && record.state === DiscoveryState.Verified) return;
+    if (!this.isProbeEligible(record, force)) return;
 
     const now = Date.now();
     this.registry.recordProbeAttempt(devId, now);

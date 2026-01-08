@@ -116,7 +116,6 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
       json: true
     },
 
-    // TODO: Show who is logged in.
     loggedIn: {
       title: "Logged in as: ",
       hide: true,
@@ -134,6 +133,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
   async getSettings(): Promise<Setting[]> {
     const userCode = this.settingsStorage.values.userCode || "";
     var loginMethod = this.settingsStorage.values.loginMethod;
+    const tokenInfo = this.settingsStorage.values.tokenInfo as TuyaTokenInfo | undefined;
 
     // If old version had userId, use TuyaLoginMethod.Account
     if (!loginMethod && !!this.settingsStorage.values.userId) {
@@ -155,6 +155,14 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     this.settingsStorage.settings.accessId.hide = loginMethod != TuyaLoginMethod.Account;
     this.settingsStorage.settings.accessKey.hide = loginMethod != TuyaLoginMethod.Account;
     this.settingsStorage.settings.country.hide = loginMethod != TuyaLoginMethod.Account;
+    this.settingsStorage.settings.loggedIn.hide = !tokenInfo;
+    if (tokenInfo?.type === TuyaLoginMethod.App) {
+      this.settingsStorage.settings.loggedIn.defaultValue = tokenInfo.username || tokenInfo.uid || "";
+    } else if (tokenInfo?.type === TuyaLoginMethod.Account) {
+      this.settingsStorage.settings.loggedIn.defaultValue = tokenInfo.uid || this.settingsStorage.values.userId || "";
+    } else {
+      this.settingsStorage.settings.loggedIn.defaultValue = "";
+    }
     const baseSettings = await this.settingsStorage.getSettings();
     return [...baseSettings, ...this.getDiscoverySettings()];
   }
@@ -410,22 +418,33 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
       offline: records.filter(r => r.online === false).length,
     };
 
-    const summary = `Verified: ${counts.verified} • Force confirmed: ${counts.unverified} • Candidates: ${counts.candidates} • Offline: ${counts.offline}`;
+    const summary = `Verified: ${counts.verified} • Unverified: ${counts.unverified} • Candidates: ${counts.candidates} • Offline: ${counts.offline}`;
 
     const { choices, selectedLabel } = this.buildDiscoveryChoiceLabels(records);
+
+    // If nothing is selected yet, default to the first selectable device.
+    if (!this.storage.getItem(DISCOVERY_SELECTED_STORAGE_KEY) && choices.length) {
+      const firstDevId = this.discoveryChoiceMap.get(choices[0]);
+      if (firstDevId) {
+        this.storage.setItem(DISCOVERY_SELECTED_STORAGE_KEY, firstDevId);
+      }
+    }
+
+    // Recompute selectedLabel after defaulting.
+    const recomputed = this.buildDiscoveryChoiceLabels(records);
     const diagnostics = this.storage.getItem(DISCOVERY_DIAGNOSTICS_STORAGE_KEY) ?? "";
 
     const selectionSetting: Setting = {
       key: DISCOVERY_SETTING_SELECTED,
       group: DISCOVERY_GROUP,
-      title: "Candidate Device",
-      description: choices.length
-        ? "Choose a candidate or force-confirmed device to manage."
-        : "No candidates available.",
-      choices,
-      value: selectedLabel,
+      title: "Target Device",
+      type: "string",
+      description: recomputed.choices.length
+        ? "Choose a candidate or unverified device to manage."
+        : "No candidates or unverified devices available.",
+      choices: recomputed.choices,
+      value: recomputed.selectedLabel,
     };
-
     return [
       {
         key: "discovery.summary",
@@ -481,16 +500,19 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     ];
   }
 
-  private buildDiscoveryChoiceLabels(records: ReturnType<DiscoveryRegistry["getRecords"]>): {
-    choices: string[];
-    selectedLabel?: string;
-  } {
+  private buildDiscoveryChoiceLabels(
+    records: ReturnType<DiscoveryRegistry["getRecords"]>
+  ): { choices: string[]; selectedLabel?: string } {
+    // Rebuild label -> devId map each time settings are rendered.
     this.discoveryChoiceMap.clear();
-    const devIdToLabel = new Map<string, string>();
-    const labelCounts = new Map<string, number>();
+
+    const selectedDevId = this.storage.getItem(DISCOVERY_SELECTED_STORAGE_KEY) ?? "";
     const choices: string[] = [];
-    const selectableRecords = records.filter(
-      record => record.state === DiscoveryState.Candidate || record.state === DiscoveryState.Unverified,
+    let selectedLabel: string | undefined;
+
+    const labelCounts = new Map<string, number>();
+    const selectableRecords = records.filter((r) =>
+      r.state === DiscoveryState.Candidate || r.state === DiscoveryState.Unverified
     );
 
     for (const record of selectableRecords) {
@@ -498,28 +520,31 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
       const statusLabel = record.online === false ? "Offline" : "Online";
       const name = record.identity?.name || "Unknown device";
       const baseLabel = `${name} (${stateLabel}, ${statusLabel}, ${this.redactDevId(record.devId)})`;
+
       const count = labelCounts.get(baseLabel) ?? 0;
       labelCounts.set(baseLabel, count + 1);
       const label = count > 0 ? `${baseLabel} #${count + 1}` : baseLabel;
+
       choices.push(label);
       this.discoveryChoiceMap.set(label, record.devId);
-      devIdToLabel.set(record.devId, label);
-    }
 
-    const selectedDevId = this.storage.getItem(DISCOVERY_SELECTED_STORAGE_KEY);
-    const selectedLabel = selectedDevId ? devIdToLabel.get(selectedDevId) : undefined;
+      if (record.devId === selectedDevId) {
+        selectedLabel = label;
+      }
+    }
 
     return { choices, selectedLabel };
   }
 
   private handleDiscoverySetting(key: string, value: string): boolean {
     if (key === DISCOVERY_SETTING_SELECTED) {
-      const devId = this.discoveryChoiceMap.get(value);
+      const devId = value ? this.discoveryChoiceMap.get(value) : undefined;
       if (devId) {
         this.storage.setItem(DISCOVERY_SELECTED_STORAGE_KEY, devId);
       } else {
         this.storage.removeItem(DISCOVERY_SELECTED_STORAGE_KEY);
       }
+
       this.onDeviceEvent(ScryptedInterface.Settings, undefined);
       return true;
     }
@@ -635,9 +660,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
   private async removeScryptedDevice(devId: string): Promise<void> {
     if (!this.devices.has(devId)) return;
     this.devices.delete(devId);
-    await sdk.deviceManager.onDevicesChanged({
-      devices: Array.from(this.devices.values()).map(d => ({ ...d.deviceSpecs, providerNativeId: this.nativeId })),
-    });
+    await sdk.deviceManager.onDeviceRemoved(devId);
   }
 
   private async upsertScryptedDevice(devId: string): Promise<void> {
@@ -684,7 +707,13 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
           this.discoveryController?.scheduleProbe(devId);
         }
       } else if (bizCode === "delete") {
-        // TODO: Remove device
+        this.tuyaDevices.delete(devId);
+        this.discoveryRegistry.removeRecord(devId);
+        void this.removeScryptedDevice(devId);
+        if (this.storage.getItem(DISCOVERY_SELECTED_STORAGE_KEY) === devId) {
+          this.storage.removeItem(DISCOVERY_SELECTED_STORAGE_KEY);
+        }
+        this.onDeviceEvent(ScryptedInterface.Settings, undefined);
       } else if (bizCode === "nameUpdate") {
         if (!device) return;
         const name = message.data.bizData?.name;

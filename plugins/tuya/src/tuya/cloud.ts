@@ -4,7 +4,9 @@ import {
   TuyaDeviceStatus,
   RTSPToken,
   TuyaDevice,
-  TuyaResponse
+  TuyaResponse,
+  TuyaDeviceFunction,
+  TuyaDeviceSchema
 } from "./const";
 import { randomBytes, createHmac, hash } from "node:crypto";
 
@@ -80,10 +82,33 @@ export class TuyaCloudAPI {
 
     for (var i = 0; i < devices.length; i++) {
       var device = devices[i];
-      const response = await this._request("get", `/v1.0/devices/${device.id}/functions`);
+      const response = await this._request<{ category?: string; functions?: TuyaDeviceFunction[] }>("get", `/v1.0/devices/${device.id}/functions`);
       if (!response.success) continue;
-      // TODO: Add schema
-      // device.schema = response.result.function;
+      const functions = response.result?.functions;
+      if (Array.isArray(functions)) {
+        const statusCodes = new Set((device.status || []).map(s => s.code));
+        const schemas: TuyaDeviceSchema[] = [];
+        for (const fn of functions) {
+          if (!fn?.code) continue;
+          let specs: any = {};
+          if (typeof fn.values === "string" && fn.values.length) {
+            try {
+              specs = JSON.parse(fn.values);
+            } catch {
+              continue;
+            }
+          }
+          schemas.push({
+            code: fn.code,
+            mode: statusCodes.has(fn.code) ? "rw" : "w",
+            type: fn.type as any,
+            specs
+          });
+        }
+        device.schema = schemas;
+      } else {
+        device.schema = [];
+      }
       devices[i] = device;
     }
     return devices;
