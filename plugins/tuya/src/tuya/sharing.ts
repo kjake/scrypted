@@ -109,9 +109,11 @@ export class TuyaSharingAPI {
 
   public async getWebRTCConfig(deviceId: string): Promise<TuyaWebRtcConfig> {
     const host = this.getJarvisHost();
+    const clientTraceId = randomUUID();
+    console.log(`[TuyaSharing] WebRTC config request deviceId=${deviceId} clientTraceId=${clientTraceId}`);
     const response = await this.jarvisRequest<TuyaWebRtcConfig>(host, "/api/jarvis/config", {
       devId: deviceId,
-      clientTraceId: randomUUID(),
+      clientTraceId,
     });
     return response;
   }
@@ -153,14 +155,26 @@ export class TuyaSharingAPI {
   }
 
   private getJarvisHost(): string {
+    console.log(`[TuyaSharing] tokenInfo.endpoint=${this.tokenInfo.endpoint}`);
     try {
-      return new URL(this.tokenInfo.endpoint).host;
+      const host = new URL(this.tokenInfo.endpoint).host;
+      console.log(`[TuyaSharing] jarvisHost=${host}`);
+      console.log(`[TuyaSharing] jarvisUrl=https://${host}/api/jarvis/config`);
+      return host;
     } catch {
-      return this.tokenInfo.endpoint.replace(/^https?:\/\//, "");
+      const host = this.tokenInfo.endpoint.replace(/^https?:\/\//, "");
+      console.log(`[TuyaSharing] jarvisHost=${host}`);
+      console.log(`[TuyaSharing] jarvisUrl=https://${host}/api/jarvis/config`);
+      return host;
     }
   }
 
   private async jarvisRequest<T = any>(host: string, path: string, data: Record<string, any>): Promise<T> {
+    const url = `https://${host}${path}`;
+    const accessTokenValid = this.tokenInfo.expires > Date.now();
+    console.log(`[TuyaSharing] jarvisRequest url=${url}`);
+    console.log(`[TuyaSharing] jarvisRequest payload=${JSON.stringify(data)}`);
+    console.log(`[TuyaSharing] jarvisRequest authHeader=${Boolean(this.tokenInfo.accessToken)} accessTokenValid=${accessTokenValid}`);
     const response = await this.session.request({
       method: "POST",
       baseURL: `https://${host}`,
@@ -176,6 +190,8 @@ export class TuyaSharingAPI {
       },
     });
 
+    console.log(`[TuyaSharing] jarvisResponse status=${response.status}`);
+    console.log(`[TuyaSharing] jarvisResponse raw=${response.data}`);
     const payload = JSON.parse(response.data) as { success?: boolean; result?: T; errorMsg?: string };
     if (!payload?.success || !payload.result) {
       throw new Error(payload?.errorMsg || "Failed to fetch WebRTC configuration.");
