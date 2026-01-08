@@ -24,7 +24,6 @@ import sdk, {
   RTCSignalingSendIceCandidate,
   RTCSignalingSession,
 } from "@scrypted/sdk";
-import { connectRTCSignalingClients } from "@scrypted/common/src/rtc-signaling";
 import { TuyaAccessory } from "./accessory";
 import { TuyaDeviceStatus } from "../tuya/const";
 import { TuyaWebRtcSignalingClient } from "../tuya/webrtc";
@@ -73,6 +72,87 @@ function createTuyaOfferSetup(iceServers: RTCIceServer[]): RTCAVSignalingSetup {
       direction: "recvonly",
     },
   };
+}
+
+function logSendCandidate(console: Console, type: string, session: RTCSignalingSession): RTCSignalingSendIceCandidate {
+  return async (candidate) => {
+    try {
+      console.log?.(`${type} trickled candidate:`, candidate.sdpMLineIndex, candidate.candidate);
+      await session.addIceCandidate(candidate);
+    } catch (e) {
+      console.error?.("addIceCandidate error", e);
+      throw e;
+    }
+  };
+}
+
+function createCandidateQueue(console: Console, type: string, session: RTCSignalingSession) {
+  let ready = false;
+  let candidateQueue: RTCIceCandidateInit[] = [];
+  const sendCandidate = logSendCandidate(console, type, session);
+  const queueSendCandidate: RTCSignalingSendIceCandidate = async (candidate: RTCIceCandidateInit) => {
+    if (!ready) {
+      candidateQueue.push(candidate);
+    } else {
+      await sendCandidate(candidate);
+    }
+  };
+
+  return {
+    flush() {
+      ready = true;
+      for (const candidate of candidateQueue) {
+        void sendCandidate(candidate);
+      }
+      candidateQueue = [];
+    },
+    queueSendCandidate,
+  };
+}
+
+async function getSignalingSessionOptions(session: RTCSignalingSession) {
+  return typeof session.options === "object" ? session.options : await session.getOptions();
+}
+
+async function connectRTCSignalingClients(
+  console: Console,
+  offerClient: RTCSignalingSession,
+  offerSetup: Partial<RTCAVSignalingSetup>,
+  answerClient: RTCSignalingSession,
+  answerSetup: Partial<RTCAVSignalingSetup>
+) {
+  const offerOptions = await getSignalingSessionOptions(offerClient);
+  const answerOptions = await getSignalingSessionOptions(answerClient);
+  const disableTrickle = offerOptions?.disableTrickle || answerOptions?.disableTrickle;
+
+  if (offerOptions?.offer && answerOptions?.offer) {
+    throw new Error("Both RTC clients have offers and can not negotiate.");
+  }
+
+  if (offerOptions?.requiresOffer && answerOptions?.requiresOffer) {
+    throw new Error("Both RTC clients require offers and can not negotiate.");
+  }
+
+  offerSetup.type = "offer";
+  answerSetup.type = "answer";
+
+  const answerQueue = createCandidateQueue(console, "offer", answerClient);
+  const offerQueue = createCandidateQueue(console, "answer", offerClient);
+
+  const offer = await offerClient.createLocalDescription(
+    "offer",
+    offerSetup as RTCAVSignalingSetup,
+    disableTrickle ? undefined : answerQueue.queueSendCandidate
+  );
+  await answerClient.setRemoteDescription(offer, answerSetup as RTCAVSignalingSetup);
+  const answer = await answerClient.createLocalDescription(
+    "answer",
+    answerSetup as RTCAVSignalingSetup,
+    disableTrickle ? undefined : offerQueue.queueSendCandidate
+  );
+  await offerClient.setRemoteDescription(answer, offerSetup as RTCAVSignalingSetup);
+  offerQueue.flush();
+  answerQueue.flush();
 }
 
 export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCamera, BinarySensor, MotionSensor, OnOff, RTCSignalingChannel {

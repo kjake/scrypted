@@ -156,7 +156,7 @@ export class TuyaSharingAPI {
     try {
       return new URL(this.tokenInfo.endpoint).host;
     } catch {
-      return this.tokenInfo.endpoint.replace(/^https?:\\/\\//, "");
+      return this.tokenInfo.endpoint.replace(/^https?:\/\//, "");
     }
   }
 

@@ -386,7 +386,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     try {
       if (this.api instanceof TuyaSharingAPI) {
         const api = this.api;
-        const fetch = async function() {
+        const fetch = async () => {
           const homes = await api.queryHomes();
           this.tuyaHomeIds = homes.map(h => h.ownerId);
           return await api.fetchMqttConfig(this.tuyaHomeIds, devices.map(d => d.id));
