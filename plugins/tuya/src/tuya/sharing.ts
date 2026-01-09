@@ -11,6 +11,7 @@ export type TuyaSharingTokenInfo = {
   terminalId: string;
   username: string;
   endpoint: string;
+  mqttHost?: string;
   cookies?: string[];
   email?: string;
   country?: string;
@@ -95,13 +96,16 @@ export class TuyaSharingAPI {
     console.log(`[TuyaSharing] mqttConfig responseRaw=${response.data}`);
 
     const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
-    const result = raw?.result as { msid?: string; password?: string; mobileMqttsUrl?: string; mqttsUrl?: string; mqttUrl?: string; url?: string } | undefined;
+    const result = raw?.result as { msid?: string; password?: string } | undefined;
     if (!raw?.success || !result?.msid || !result?.password) {
       throw new Error(raw?.errorMsg || "Failed to fetch MQTT Config");
     }
+    if (!this.tokenInfo.mqttHost) {
+      throw new Error("MQTT host not available from login response.");
+    }
 
     return {
-      url: `wss://${result.mobileMqttsUrl ?? result.mqttsUrl ?? result.mqttUrl ?? result.url}/mqtt`,
+      url: `wss://${this.tokenInfo.mqttHost}/mqtt`,
       clientId: `web_${result.msid}`,
       username: `web_${result.msid}`,
       password: result.password,
@@ -320,6 +324,7 @@ export class TuyaSharingAPI {
           sid?: string;
           domain?: {
             mobileApiUrl?: string;
+            mobileMqttsUrl?: string;
           };
         };
 
@@ -337,6 +342,7 @@ export class TuyaSharingAPI {
             terminalId: result.sid ?? "",
             endpoint: result.domain?.mobileApiUrl ?? endpoint,
             username: result.username ?? result.email ?? "",
+            mqttHost: result.domain?.mobileMqttsUrl,
             cookies: Array.isArray(cookies) ? cookies : cookies ? [cookies] : [],
             email: result.email,
             country: countryName,
