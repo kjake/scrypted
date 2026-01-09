@@ -1,5 +1,6 @@
 import { connect, MqttClient } from "mqtt";
 import { randomBytes } from "node:crypto";
+import { logDebug } from "./debug";
 
 export type TuyaWebRtcIceServer = {
   urls: string;
@@ -91,6 +92,12 @@ export class TuyaWebRtcSignalingClient {
 
   async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      logDebug("webrtc mqtt connect", {
+        url: this.config.mqtt.url,
+        clientId: this.config.mqtt.clientId,
+        username: this.config.mqtt.username,
+        subscribeTopic: this.subscribeTopic,
+      });
       const client = connect(this.config.mqtt.url, {
         clientId: this.config.mqtt.clientId,
         username: this.config.mqtt.username,
@@ -141,6 +148,7 @@ export class TuyaWebRtcSignalingClient {
       replay: { is_replay: 0 },
       datachannel_enable: enableDataChannel,
     };
+    logDebug("webrtc sendOffer", { streamType, enableDataChannel });
     this.publish("offer", 302, message);
   }
 
@@ -149,15 +157,18 @@ export class TuyaWebRtcSignalingClient {
       mode: "webrtc",
       candidate,
     };
+    logDebug("webrtc sendCandidate", { candidate });
     this.publish("candidate", 302, message);
   }
 
   async sendDisconnect(): Promise<void> {
+    logDebug("webrtc sendDisconnect");
     this.publish("disconnect", 302, { mode: "webrtc" });
   }
 
   private publish(type: string, protocol: number, message: object) {
     if (!this.client) return;
+    logDebug("webrtc publish", { type, protocol, topic: this.publishTopic });
     const header: TuyaMqttFrameHeader = {
       type,
       from: this.config.mqtt.uid,
@@ -190,6 +201,7 @@ export class TuyaWebRtcSignalingClient {
     try {
       message = JSON.parse(payload);
     } catch (error) {
+      logDebug("webrtc message parse failed", error);
       return;
     }
 

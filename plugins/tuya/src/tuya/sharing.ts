@@ -3,6 +3,7 @@ import { RTSPToken, TuyaDevice, TuyaDeviceFunction, TuyaDeviceSchema, TuyaDevice
 import { TuyaWebRtcConfig } from "./webrtc";
 import { getEndPointWithCountryName } from "./deprecated";
 import { isCameraCategory } from "../discovery/cameraCategories";
+import { logDebug } from "./debug";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomInt, randomUUID } from "node:crypto";
 import { MqttConfig } from "./mq";
 
@@ -42,31 +43,7 @@ export class TuyaSharingAPI {
   }
 
   public async fetchDevices(): Promise<TuyaDevice[]> {
-    const host = this.getJarvisHost();
-    const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
-    const headers = {
-      "Content-Type": "application/json; charset=utf-8",
-      Accept: "*/*",
-      Origin: `https://${host}`,
-      Referer: `https://${host}/playback`,
-      "X-Requested-With": "XMLHttpRequest",
-      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
-    };
-
-    const jarvisPost = async <T>(path: string, data?: Record<string, any>) => {
-      const response = await this.session.request({
-        method: "POST",
-        baseURL: `https://${host}`,
-        url: path,
-        data: data ? JSON.stringify(data) : undefined,
-        headers,
-      });
-      const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
-      if (!raw?.success) {
-        throw new Error(raw?.errorMsg || `Jarvis request failed: ${path}`);
-      }
-      return raw.result as T;
-    };
+    await this.getAppInfo();
 
     const devices: {
       deviceId: string;
@@ -76,11 +53,9 @@ export class TuyaSharingAPI {
       uuid?: string;
     }[] = [];
 
-    const homes = await jarvisPost<{ gid: number }[]>("/api/new/common/homeList");
+    const homes = await this.getHomeList();
     for (const home of homes ?? []) {
-      const rooms = await jarvisPost<{ deviceList?: typeof devices }[]>("/api/new/common/roomList", {
-        homeId: String(home.gid),
-      });
+      const rooms = await this.getRoomList(String(home.gid));
       for (const room of rooms ?? []) {
         for (const device of room.deviceList ?? []) {
           if (!device?.deviceId || !device.category) continue;
@@ -92,7 +67,7 @@ export class TuyaSharingAPI {
       }
     }
 
-    const shared = await jarvisPost<{ securityWebCShareInfoList?: { deviceInfoList?: typeof devices }[] }>("/api/new/playback/shareList");
+    const shared = await this.getSharedHomeList();
     for (const sharedHome of shared?.securityWebCShareInfoList ?? []) {
       for (const device of sharedHome.deviceInfoList ?? []) {
         if (!device?.deviceId || !device.category) continue;
@@ -156,6 +131,7 @@ export class TuyaSharingAPI {
   public async fetchMqttConfig(_: string[], __: string[]): Promise<MqttConfig> {
     const host = this.getJarvisHost();
     const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
+    logDebug("mqttConfig request", { host, cookieHeader });
     const response = await this.session.request({
       method: "POST",
       baseURL: `https://${host}`,
@@ -171,9 +147,11 @@ export class TuyaSharingAPI {
       },
     });
 
-    console.log(`[TuyaSharing] mqttConfig status=${response.status}`);
-    console.log(`[TuyaSharing] mqttConfig responseCookies=${JSON.stringify(response.headers?.["set-cookie"] ?? [])}`);
-    console.log(`[TuyaSharing] mqttConfig responseRaw=${response.data}`);
+    logDebug("mqttConfig response", {
+      status: response.status,
+      cookies: response.headers?.["set-cookie"] ?? [],
+      raw: response.data,
+    });
 
     const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
     const result = raw?.result as { msid?: string; password?: string } | undefined;
@@ -196,7 +174,7 @@ export class TuyaSharingAPI {
   public async getWebRTCConfig(deviceId: string): Promise<TuyaWebRtcConfig> {
     const host = this.getJarvisHost();
     const clientTraceId = randomUUID();
-    console.log(`[TuyaSharing] WebRTC config request deviceId=${deviceId} clientTraceId=${clientTraceId}`);
+    logDebug("webrtcConfig request", { deviceId, clientTraceId, host });
     const response = await this.jarvisRequest<TuyaWebRtcConfig>(host, "/api/jarvis/config", {
       devId: deviceId,
       clientTraceId,
@@ -234,7 +212,7 @@ export class TuyaSharingAPI {
         }
       }
     } catch {
-      console.log(`[TuyaSharing] Could not fetch specifications for device: ${device.name} [${device.id}]`)
+      logDebug("specifications fetch failed", { deviceId: device.id, name: device.name });
     }
     device.schema = Array.from(schemas.values());
     return device;
@@ -242,25 +220,70 @@ export class TuyaSharingAPI {
 
   private getJarvisHost(): string {
     const endpoint = getEndPointWithCountryName(this.tokenInfo.country ?? "United States");
-    console.log(`[TuyaSharing] jarvisEndpoint=${endpoint}`);
+    logDebug("jarvisEndpoint", endpoint);
     try {
       const host = new URL(endpoint).host;
-      console.log(`[TuyaSharing] jarvisHost=${host}`);
-      console.log(`[TuyaSharing] jarvisUrl=https://${host}/api/jarvis/config`);
+      logDebug("jarvisHost", host);
+      logDebug("jarvisUrl", `https://${host}/api/jarvis/config`);
       return host;
     } catch {
       const host = endpoint.replace(/^https?:\/\//, "");
-      console.log(`[TuyaSharing] jarvisHost=${host}`);
-      console.log(`[TuyaSharing] jarvisUrl=https://${host}/api/jarvis/config`);
+      logDebug("jarvisHost", host);
+      logDebug("jarvisUrl", `https://${host}/api/jarvis/config`);
       return host;
     }
   }
 
+  private async jarvisPost<T>(path: string, data?: Record<string, any>): Promise<T> {
+    const host = this.getJarvisHost();
+    const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
+    logDebug("jarvisPost request", { path, data, host, cookieHeader });
+    const response = await this.session.request({
+      method: "POST",
+      baseURL: `https://${host}`,
+      url: path,
+      data: data ? JSON.stringify(data) : undefined,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Accept: "*/*",
+        Origin: `https://${host}`,
+        Referer: `https://${host}/playback`,
+        "X-Requested-With": "XMLHttpRequest",
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+      },
+    });
+    logDebug("jarvisPost response", {
+      path,
+      status: response.status,
+      cookies: response.headers?.["set-cookie"] ?? [],
+      raw: response.data,
+    });
+    const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
+    if (!raw?.success) {
+      throw new Error(raw?.errorMsg || `Jarvis request failed: ${path}`);
+    }
+    return raw.result as T;
+  }
+
+  private async getAppInfo(): Promise<void> {
+    await this.jarvisPost("/api/customized/web/app/info");
+  }
+
+  private async getHomeList(): Promise<{ gid: number }[]> {
+    return this.jarvisPost<{ gid: number }[]>("/api/new/common/homeList");
+  }
+
+  private async getRoomList(homeId: string): Promise<{ deviceList?: { deviceId: string; deviceName: string; category: string; productId?: string; uuid?: string }[] }[]> {
+    return this.jarvisPost("/api/new/common/roomList", { homeId });
+  }
+
+  private async getSharedHomeList(): Promise<{ securityWebCShareInfoList?: { deviceInfoList?: { deviceId: string; deviceName: string; category: string; productId?: string; uuid?: string }[] }[] }> {
+    return this.jarvisPost("/api/new/playback/shareList");
+  }
+
   private async jarvisRequest<T = any>(host: string, path: string, data: Record<string, any>): Promise<T> {
     const url = `https://${host}${path}`;
-    console.log(`[TuyaSharing] jarvisRequest url=${url}`);
-    console.log(`[TuyaSharing] jarvisRequest payload=${JSON.stringify(data)}`);
-    console.log(`[TuyaSharing] jarvisRequest authHeader=false accessTokenValid=false`);
+    logDebug("jarvisRequest", { url, data });
     const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
     const response = await this.session.request({
       method: "POST",
@@ -277,8 +300,7 @@ export class TuyaSharingAPI {
       },
     });
 
-    console.log(`[TuyaSharing] jarvisResponse status=${response.status}`);
-    console.log(`[TuyaSharing] jarvisResponse raw=${response.data}`);
+    logDebug("jarvisResponse", { status: response.status, raw: response.data });
     const payload = JSON.parse(response.data) as { success?: boolean; result?: T; errorMsg?: string };
     if (!payload?.success || !payload.result) {
       throw new Error(payload?.errorMsg || "Failed to fetch WebRTC configuration.");
@@ -322,6 +344,7 @@ export class TuyaSharingAPI {
     headers.set("X-time", t.toString())
     headers.set("X-sign", _restfulSign(hashKey, queryEncData, bodyEncData, headers));
 
+    logDebug("sharingRequest", { method, path, params, body });
     const response = await this.session.request({
       method,
       url: path,
@@ -330,6 +353,7 @@ export class TuyaSharingAPI {
       data: !body || !Object.keys(body).length ? undefined : JSON.stringify(body)
     });
 
+    logDebug("sharingResponse", { path, status: response.status, raw: response.data });
     const ret = response.data ? JSON.parse(response.data) as TuyaResponse<string> : undefined;
     if (!ret) throw Error(`Failed to receive response`);
 
@@ -344,7 +368,7 @@ export class TuyaSharingAPI {
   static async generateQRCode(userCode: string, countryName?: string): Promise<TuyaLoginQRCode> {
     const endpoint = getEndPointWithCountryName(countryName ?? "United States");
     const host = new URL(endpoint).host;
-    console.log(`[TuyaSharing] generateQRCode userCode=${userCode} country=${countryName ?? "United States"} host=${host}`);
+    logDebug("generateQRCode request", { userCode, country: countryName ?? "United States", host });
     const session = new Axios({ baseURL: `https://${host}` });
     const response = await session.request({
       method: "POST",
@@ -357,9 +381,11 @@ export class TuyaSharingAPI {
         "X-Requested-With": "XMLHttpRequest",
       },
     });
-    console.log(`[TuyaSharing] generateQRCode responseStatus=${response.status}`);
-    console.log(`[TuyaSharing] generateQRCode responseCookies=${JSON.stringify(response.headers?.["set-cookie"] ?? [])}`);
-    console.log(`[TuyaSharing] generateQRCode responseRaw=${response.data}`);
+    logDebug("generateQRCode response", {
+      status: response.status,
+      cookies: response.headers?.["set-cookie"] ?? [],
+      raw: response.data,
+    });
     const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
     if (!raw?.success) throw Error(raw?.errorMsg || "Failed to fetch qr code with user code.");
     const data: TuyaResponse<{ qrcode: string }> = {
@@ -375,7 +401,7 @@ export class TuyaSharingAPI {
     const host = new URL(endpoint).host;
     const session = new Axios({ baseURL: `https://${host}` });
     const payload = JSON.stringify({ token: qrCodeLogin.result.qrcode });
-    console.log(`[TuyaSharing] pollLogin userCode=${qrCodeLogin.userCode} host=${host} payload=${payload}`);
+    logDebug("pollLogin request", { userCode: qrCodeLogin.userCode, host, payload });
 
     for (let i = 0; i < 60; i += 1) {
       const response = await session.request({
@@ -390,9 +416,12 @@ export class TuyaSharingAPI {
           "X-Requested-With": "XMLHttpRequest",
         },
       });
-      console.log(`[TuyaSharing] pollLogin attempt=${i + 1} status=${response.status}`);
-      console.log(`[TuyaSharing] pollLogin responseCookies=${JSON.stringify(response.headers?.["set-cookie"] ?? [])}`);
-      console.log(`[TuyaSharing] pollLogin responseRaw=${response.data}`);
+      logDebug("pollLogin response", {
+        attempt: i + 1,
+        status: response.status,
+        cookies: response.headers?.["set-cookie"] ?? [],
+        raw: response.data,
+      });
 
       const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
       if (raw?.success && raw?.result) {

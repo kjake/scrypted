@@ -1,5 +1,6 @@
 import { connect, IClientPublishOptions, MqttClient, OnCloseCallback, OnErrorCallback, OnMessageCallback } from "mqtt";
 import { EventEmitter } from "events";
+import { logDebug } from "./debug";
 
 export type MqttConfig = {
   url: string;
@@ -65,6 +66,12 @@ export class TuyaMQ extends EventEmitter<TuyaMQEvent> {
     const config = this.config && (!this.config.expires || (this.config.expires - 60_000) > Date.now())
       ? this.config
       : await this.fetchConfig()
+    logDebug("mqtt connect", {
+      url: config.url,
+      clientId: config.clientId,
+      username: config.username,
+      topics: config.topics,
+    });
     const client = connect(config.url, {
       clientId: config.clientId,
       username: config.username,
