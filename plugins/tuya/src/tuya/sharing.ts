@@ -130,7 +130,7 @@ export class TuyaSharingAPI {
 
   public async fetchMqttConfig(_: string[], __: string[]): Promise<MqttConfig> {
     const host = this.getJarvisHost();
-    const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
+    const cookieHeader = this.getCookieHeader();
     logDebug("mqttConfig request", { host, cookieHeader });
     const response = await this.session.request({
       method: "POST",
@@ -147,6 +147,7 @@ export class TuyaSharingAPI {
       },
     });
 
+    this.updateCookies(response.headers?.["set-cookie"]);
     logDebug("mqttConfig response", {
       status: response.status,
       cookies: response.headers?.["set-cookie"] ?? [],
@@ -236,7 +237,7 @@ export class TuyaSharingAPI {
 
   private async jarvisPost<T>(path: string, data?: Record<string, any>): Promise<T> {
     const host = this.getJarvisHost();
-    const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
+    const cookieHeader = this.getCookieHeader();
     logDebug("jarvisPost request", { path, data, host, cookieHeader });
     const response = await this.session.request({
       method: "POST",
@@ -252,6 +253,7 @@ export class TuyaSharingAPI {
         ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
     });
+    this.updateCookies(response.headers?.["set-cookie"]);
     logDebug("jarvisPost response", {
       path,
       status: response.status,
@@ -284,7 +286,7 @@ export class TuyaSharingAPI {
   private async jarvisRequest<T = any>(host: string, path: string, data: Record<string, any>): Promise<T> {
     const url = `https://${host}${path}`;
     logDebug("jarvisRequest", { url, data });
-    const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
+    const cookieHeader = this.getCookieHeader();
     const response = await this.session.request({
       method: "POST",
       baseURL: `https://${host}`,
@@ -299,6 +301,7 @@ export class TuyaSharingAPI {
         ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
     });
+    this.updateCookies(response.headers?.["set-cookie"]);
 
     logDebug("jarvisResponse", { status: response.status, raw: response.data });
     const payload = JSON.parse(response.data) as { success?: boolean; result?: T; errorMsg?: string };
@@ -344,12 +347,17 @@ export class TuyaSharingAPI {
     headers.set("X-time", t.toString())
     headers.set("X-sign", _restfulSign(hashKey, queryEncData, bodyEncData, headers));
 
+    const cookieHeader = this.getCookieHeader();
     logDebug("sharingRequest", { method, path, params, body });
+    const requestHeaders: Record<string, string> = Object.fromEntries(headers);
+    if (cookieHeader) {
+      requestHeaders.Cookie = cookieHeader;
+    }
     const response = await this.session.request({
       method,
       url: path,
       params: !params || !Object.keys(params).length ? undefined : params,
-      headers: Object.fromEntries(headers),
+      headers: requestHeaders,
       data: !body || !Object.keys(body).length ? undefined : JSON.stringify(body)
     });
 
@@ -364,6 +372,27 @@ export class TuyaSharingAPI {
   }
 
   private async refreshTokenIfNeeded() {}
+
+  private getCookieHeader(): string | undefined {
+    const normalized = normalizeCookies(this.tokenInfo.cookies);
+    if (normalized.length && !areCookiesEqual(this.tokenInfo.cookies ?? [], normalized)) {
+      this.setCookies(normalized);
+    }
+    return normalized.length ? normalized.join("; ") : undefined;
+  }
+
+  private updateCookies(cookies: string[] | string | undefined) {
+    const merged = mergeCookies(this.tokenInfo.cookies, cookies);
+    if (!areCookiesEqual(this.tokenInfo.cookies ?? [], merged)) {
+      this.setCookies(merged);
+    }
+  }
+
+  private setCookies(cookies: string[]) {
+    if (!cookies.length) return;
+    this.tokenInfo = { ...this.tokenInfo, cookies };
+    this.updateToken(this.tokenInfo);
+  }
 
   static async generateQRCode(userCode: string, countryName?: string): Promise<TuyaLoginQRCode> {
     const endpoint = getEndPointWithCountryName(countryName ?? "United States");
@@ -443,7 +472,7 @@ export class TuyaSharingAPI {
           throw new Error(`QR login mismatch. Expected ${qrCodeLogin.userCode} but authenticated ${actualUser}.`);
         }
 
-        const cookies = response.headers?.["set-cookie"];
+        const cookies = mergeCookies(undefined, response.headers?.["set-cookie"]);
         if (result.uid) {
           return {
             userCode: qrCodeLogin.userCode,
@@ -452,7 +481,7 @@ export class TuyaSharingAPI {
             endpoint: result.domain?.mobileApiUrl ?? endpoint,
             username: result.username ?? result.email ?? "",
             mqttHost: result.domain?.mobileMqttsUrl,
-            cookies: Array.isArray(cookies) ? cookies : cookies ? [cookies] : [],
+            cookies,
             email: result.email,
             country: countryName,
           };
@@ -468,6 +497,50 @@ export class TuyaSharingAPI {
 
 function _formToJson(content: Record<string, any>) {
   return JSON.stringify(content, null, 0);
+}
+
+function normalizeCookies(cookies: string[] | string | undefined): string[] {
+  const raw = Array.isArray(cookies) ? cookies : cookies ? [cookies] : [];
+  const map = new Map<string, string>();
+  for (const entry of raw) {
+    const pair = entry.split(";")[0]?.trim();
+    if (!pair) continue;
+    const [name, ...rest] = pair.split("=");
+    if (!name || rest.length === 0) continue;
+    map.set(name, `${name}=${rest.join("=")}`);
+  }
+  return Array.from(map.values());
+}
+
+function mergeCookies(existing: string[] | string | undefined, incoming: string[] | string | undefined): string[] {
+  const map = new Map<string, string>();
+  for (const cookie of normalizeCookies(existing)) {
+    const name = cookie.split("=")[0];
+    map.set(name, cookie);
+  }
+  for (const cookie of normalizeCookies(incoming)) {
+    const name = cookie.split("=")[0];
+    map.set(name, cookie);
+  }
+  return Array.from(map.values());
+}
+
+function areCookiesEqual(a: string[] | string | undefined, b: string[] | string | undefined): boolean {
+  const mapA = new Map<string, string>();
+  const mapB = new Map<string, string>();
+  for (const cookie of normalizeCookies(a)) {
+    const name = cookie.split("=")[0];
+    mapA.set(name, cookie);
+  }
+  for (const cookie of normalizeCookies(b)) {
+    const name = cookie.split("=")[0];
+    mapB.set(name, cookie);
+  }
+  if (mapA.size !== mapB.size) return false;
+  for (const [name, value] of mapA.entries()) {
+    if (mapB.get(name) !== value) return false;
+  }
+  return true;
 }
 
 function _secretGenerating(rid: string, sid: string, hashKey: string) {
