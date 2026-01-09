@@ -256,6 +256,7 @@ export class TuyaSharingAPI {
   static async generateQRCode(userCode: string, countryName?: string): Promise<TuyaLoginQRCode> {
     const endpoint = getEndPointWithCountryName(countryName ?? "United States");
     const host = new URL(endpoint).host;
+    console.log(`[TuyaSharing] generateQRCode userCode=${userCode} country=${countryName ?? "United States"} host=${host}`);
     const session = new Axios({ baseURL: `https://${host}` });
     const response = await session.request({
       method: "POST",
@@ -268,6 +269,9 @@ export class TuyaSharingAPI {
         "X-Requested-With": "XMLHttpRequest",
       },
     });
+    console.log(`[TuyaSharing] generateQRCode responseStatus=${response.status}`);
+    console.log(`[TuyaSharing] generateQRCode responseCookies=${JSON.stringify(response.headers?.["set-cookie"] ?? [])}`);
+    console.log(`[TuyaSharing] generateQRCode responseRaw=${response.data}`);
     const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
     if (!raw?.success) throw Error(raw?.errorMsg || "Failed to fetch qr code with user code.");
     const data: TuyaResponse<{ qrcode: string }> = {
@@ -283,6 +287,7 @@ export class TuyaSharingAPI {
     const host = new URL(endpoint).host;
     const session = new Axios({ baseURL: `https://${host}` });
     const payload = JSON.stringify({ token: qrCodeLogin.result.qrcode });
+    console.log(`[TuyaSharing] pollLogin userCode=${qrCodeLogin.userCode} host=${host} payload=${payload}`);
 
     for (let i = 0; i < 60; i += 1) {
       const response = await session.request({
@@ -297,6 +302,9 @@ export class TuyaSharingAPI {
           "X-Requested-With": "XMLHttpRequest",
         },
       });
+      console.log(`[TuyaSharing] pollLogin attempt=${i + 1} status=${response.status}`);
+      console.log(`[TuyaSharing] pollLogin responseCookies=${JSON.stringify(response.headers?.["set-cookie"] ?? [])}`);
+      console.log(`[TuyaSharing] pollLogin responseRaw=${response.data}`);
 
       const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
       if (raw?.success && raw?.result) {

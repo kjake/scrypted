@@ -201,15 +201,18 @@ export class TuyaCloudAPI {
     const endpoint = getEndPointWithCountryName(country);
     const host = new URL(endpoint).host;
     const session = new Axios({ baseURL: `https://${host}` });
+    console.log(`[TuyaCloud] login start username=${username} country=${country} host=${host}`);
 
+    const tokenPayload = {
+      countryCode: country,
+      username,
+      isUid: false,
+    };
+    console.log(`[TuyaCloud] login tokenRequest=${JSON.stringify(tokenPayload)}`);
     const tokenResponse = await session.request({
       method: "POST",
       url: "/api/login/token",
-      data: JSON.stringify({
-        countryCode: country,
-        username,
-        isUid: false,
-      }),
+      data: JSON.stringify(tokenPayload),
       headers: {
         "Content-Type": "application/json; charset=utf-8",
         Accept: "*/*",
@@ -219,14 +222,17 @@ export class TuyaCloudAPI {
       },
     });
 
-    const tokenPayload = typeof tokenResponse.data === "string" ? JSON.parse(tokenResponse.data) : tokenResponse.data;
-    if (!tokenPayload?.success || !tokenPayload?.result?.token || !tokenPayload?.result?.pbKey) {
-      throw new Error(tokenPayload?.errorMsg || "Failed to fetch login token.");
+    console.log(`[TuyaCloud] login tokenStatus=${tokenResponse.status}`);
+    console.log(`[TuyaCloud] login tokenResponseCookies=${JSON.stringify(tokenResponse.headers?.["set-cookie"] ?? [])}`);
+    console.log(`[TuyaCloud] login tokenResponseRaw=${tokenResponse.data}`);
+    const tokenPayloadResponse = typeof tokenResponse.data === "string" ? JSON.parse(tokenResponse.data) : tokenResponse.data;
+    if (!tokenPayloadResponse?.success || !tokenPayloadResponse?.result?.token || !tokenPayloadResponse?.result?.pbKey) {
+      throw new Error(tokenPayloadResponse?.errorMsg || "Failed to fetch login token.");
     }
 
     const hashedPassword = createHash("md5").update(password).digest("hex");
     const publicKey = createPublicKey({
-      key: `-----BEGIN PUBLIC KEY-----\n${tokenPayload.result.pbKey}\n-----END PUBLIC KEY-----`,
+      key: `-----BEGIN PUBLIC KEY-----\n${tokenPayloadResponse.result.pbKey}\n-----END PUBLIC KEY-----`,
       format: "pem",
     });
     const encryptedPassword = publicEncrypt(publicKey, Buffer.from(hashedPassword)).toString("hex");
@@ -234,11 +240,12 @@ export class TuyaCloudAPI {
     const loginPayload = {
       countryCode: country,
       passwd: encryptedPassword,
-      token: tokenPayload.result.token,
+      token: tokenPayloadResponse.result.token,
       ifencrypt: 1,
       options: "{\"group\":1}",
       ...(username.includes("@") ? { email: username } : { mobile: username }),
     };
+    console.log(`[TuyaCloud] login payload=${JSON.stringify(loginPayload)}`);
 
     const loginResponse = await session.request({
       method: "POST",
@@ -254,6 +261,9 @@ export class TuyaCloudAPI {
     });
 
     const loginRaw = typeof loginResponse.data === "string" ? JSON.parse(loginResponse.data) : loginResponse.data;
+    console.log(`[TuyaCloud] login responseStatus=${loginResponse.status}`);
+    console.log(`[TuyaCloud] login responseCookies=${JSON.stringify(loginResponse.headers?.["set-cookie"] ?? [])}`);
+    console.log(`[TuyaCloud] login responseRaw=${loginResponse.data}`);
     if (!loginRaw?.success || !loginRaw?.result?.uid) {
       throw new Error(loginRaw?.errorMsg || "Failed to login with credentials.");
     }
