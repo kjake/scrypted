@@ -14,6 +14,8 @@ export type TuyaSharingTokenInfo = {
   terminalId: string;
   username: string;
   endpoint: string;
+  cookies?: string[];
+  email?: string;
 }
 
 export type TuyaLoginQRCode = { userCode: string } & TuyaResponse<{ qrcode: string }>
@@ -176,6 +178,7 @@ export class TuyaSharingAPI {
     console.log(`[TuyaSharing] jarvisRequest url=${url}`);
     console.log(`[TuyaSharing] jarvisRequest payload=${JSON.stringify(data)}`);
     console.log(`[TuyaSharing] jarvisRequest authHeader=${Boolean(this.tokenInfo.accessToken)} accessTokenValid=${accessTokenValid}`);
+    const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
     const response = await this.session.request({
       method: "POST",
       baseURL: `https://${host}`,
@@ -188,6 +191,7 @@ export class TuyaSharingAPI {
         Referer: `https://${host}/playback`,
         "X-Requested-With": "XMLHttpRequest",
         Authorization: `Bearer ${this.tokenInfo.accessToken}`,
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
     });
 
@@ -337,25 +341,35 @@ export class TuyaSharingAPI {
       const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
       if (raw?.success && raw?.result) {
         const result = raw.result as {
-          access_token?: string;
-          refresh_token?: string;
           uid?: string;
-          expire_time?: number;
-          terminal_id?: string;
-          endpoint?: string;
           username?: string;
+          email?: string;
+          receiver?: string;
+          sid?: string;
+          domain?: {
+            mobileApiUrl?: string;
+          };
         };
 
-        if (result.access_token && result.refresh_token && result.uid) {
+        const expectedUser = qrCodeLogin.userCode.trim().toLowerCase();
+        const actualUser = (result.email || result.username || result.receiver || "").trim().toLowerCase();
+        if (expectedUser && actualUser && expectedUser !== actualUser) {
+          throw new Error(`QR login mismatch. Expected ${qrCodeLogin.userCode} but authenticated ${actualUser}.`);
+        }
+
+        const cookies = response.headers?.["set-cookie"];
+        if (result.uid) {
           return {
             userCode: qrCodeLogin.userCode,
             uid: result.uid,
-            expires: (raw.t ?? 0) + (result.expire_time ?? 0) * 1000,
-            accessToken: result.access_token,
-            refreshToken: result.refresh_token,
-            terminalId: result.terminal_id ?? "",
-            endpoint: result.endpoint ?? endpoint,
-            username: result.username ?? "",
+            expires: raw.t ?? Date.now(),
+            accessToken: "",
+            refreshToken: "",
+            terminalId: result.sid ?? "",
+            endpoint: result.domain?.mobileApiUrl ?? endpoint,
+            username: result.username ?? result.email ?? "",
+            cookies: Array.isArray(cookies) ? cookies : cookies ? [cookies] : [],
+            email: result.email,
           };
         }
       }

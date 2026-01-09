@@ -86,20 +86,21 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
 
     // Old development account config
     userId: {
-      title: "User ID",
+      title: "Email/Phone",
       type: 'string',
-      description: "Required: You can find this information in Tuya IoT -> Cloud -> Devices -> Linked Devices.",
+      description: "Required: The email address or phone number for your Tuya account.",
       onPut: () => this.tryLogin()
     },
     accessId: {
-      title: "Access ID",
+      title: "Legacy Access ID (unused)",
       type: 'string',
-      description: "Requirerd: This is located on the main project.",
+      description: "Deprecated: No longer required for account login.",
+      hide: true,
       onPut: () => this.tryLogin()
     },
     accessKey: {
-      title: "Access Key/Secret",
-      description: "Requirerd: This is located on the main project.",
+      title: "Password",
+      description: "Required: Tuya account password.",
       type: "password",
       onPut: () => this.tryLogin()
     },
@@ -154,7 +155,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
 
     // Show old login method
     this.settingsStorage.settings.userId.hide = loginMethod != TuyaLoginMethod.Account;
-    this.settingsStorage.settings.accessId.hide = loginMethod != TuyaLoginMethod.Account;
+    this.settingsStorage.settings.accessId.hide = true;
     this.settingsStorage.settings.accessKey.hide = loginMethod != TuyaLoginMethod.Account;
     this.settingsStorage.settings.country.hide = loginMethod != TuyaLoginMethod.Account;
     this.settingsStorage.settings.loggedIn.hide = !tokenInfo;
@@ -233,7 +234,6 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
           try {
             const token = await TuyaCloudAPI.fetchToken(
               this.settingsStorage.values.userId,
-              this.settingsStorage.values.accessId,
               this.settingsStorage.values.accessKey,
               this.settingsStorage.values.country
             )

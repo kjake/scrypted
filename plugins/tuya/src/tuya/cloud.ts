@@ -1,5 +1,4 @@
 import { Axios, Method } from "axios";
-import { getEndPointWithCountryName } from "./deprecated";
 import {
   TuyaDeviceStatus,
   RTSPToken,
@@ -9,7 +8,9 @@ import {
   TuyaDeviceSchema
 } from "./const";
 import { TuyaWebRtcConfig } from "./webrtc";
+import { getEndPointWithCountryName } from "./deprecated";
 import { randomBytes, createHmac, hash } from "node:crypto";
+import { createHash, createPublicKey, publicEncrypt } from "node:crypto";
 
 /**
  * @deprecated Will eventually be removed in favor of Sharing SDK
@@ -23,6 +24,7 @@ export type TuyaCloudTokenInfo = {
   country: string;
   clientId: string;
   clientSecret: string;
+  cookies?: string[];
 }
 
 /**
@@ -238,13 +240,82 @@ export class TuyaCloudAPI {
   }
 
   static async fetchToken(
-    userId?: string,
-    clientId?: string,
-    clientSecret?: string,
+    username?: string,
+    password?: string,
     country?: string
   ): Promise<TuyaCloudTokenInfo> {
-    if (!userId || !clientId || !clientSecret || !country) throw Error('Missing credential information.');
-    return Promise.reject();
+    if (!username || !password || !country) throw Error('Missing credential information.');
+    const endpoint = getEndPointWithCountryName(country);
+    const host = new URL(endpoint).host;
+    const session = new Axios({ baseURL: `https://${host}` });
+
+    const tokenResponse = await session.request({
+      method: "POST",
+      url: "/api/login/token",
+      data: JSON.stringify({
+        countryCode: country,
+        username,
+        isUid: false,
+      }),
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Accept: "*/*",
+        Origin: `https://${host}`,
+        Referer: `https://${host}/login`,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+    });
+
+    const tokenPayload = typeof tokenResponse.data === "string" ? JSON.parse(tokenResponse.data) : tokenResponse.data;
+    if (!tokenPayload?.success || !tokenPayload?.result?.token || !tokenPayload?.result?.pbKey) {
+      throw new Error(tokenPayload?.errorMsg || "Failed to fetch login token.");
+    }
+
+    const hashedPassword = createHash("md5").update(password).digest("hex");
+    const publicKey = createPublicKey({
+      key: `-----BEGIN PUBLIC KEY-----\n${tokenPayload.result.pbKey}\n-----END PUBLIC KEY-----`,
+      format: "pem",
+    });
+    const encryptedPassword = publicEncrypt(publicKey, Buffer.from(hashedPassword)).toString("hex");
+
+    const loginPayload = {
+      countryCode: country,
+      passwd: encryptedPassword,
+      token: tokenPayload.result.token,
+      ifencrypt: 1,
+      options: "{\"group\":1}",
+      ...(username.includes("@") ? { email: username } : { mobile: username }),
+    };
+
+    const loginResponse = await session.request({
+      method: "POST",
+      url: username.includes("@") ? "/api/private/email/login" : "/api/private/phone/login",
+      data: JSON.stringify(loginPayload),
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Accept: "*/*",
+        Origin: `https://${host}`,
+        Referer: `https://${host}/login`,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+    });
+
+    const loginRaw = typeof loginResponse.data === "string" ? JSON.parse(loginResponse.data) : loginResponse.data;
+    if (!loginRaw?.success || !loginRaw?.result?.uid) {
+      throw new Error(loginRaw?.errorMsg || "Failed to login with credentials.");
+    }
+
+    const cookies = loginResponse.headers?.["set-cookie"];
+    return {
+      uid: loginRaw.result.uid,
+      expires: Date.now() + 24 * 60 * 60 * 1000,
+      accessToken: "",
+      refreshToken: "",
+      country,
+      clientId: loginRaw.result.clientId ?? "",
+      clientSecret: "",
+      cookies: Array.isArray(cookies) ? cookies : cookies ? [cookies] : [],
+    };
   }
 }
 
