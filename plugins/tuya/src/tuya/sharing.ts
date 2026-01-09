@@ -1,5 +1,5 @@
 import { Axios, Method } from "axios";
-import { RTSPToken, TuyaDevice, TuyaDeviceFunction, TuyaDeviceSchema, TuyaDeviceStatus, TuyaResponse } from "./const";
+import { RTSPToken, TuyaDevice, TuyaDeviceStatus, TuyaResponse } from "./const";
 import { TuyaWebRtcConfig } from "./webrtc";
 import { getEndPointWithCountryName } from "./deprecated";
 import { isCameraCategory } from "../discovery/cameraCategories";
@@ -101,7 +101,7 @@ export class TuyaSharingAPI {
       owner_id: "",
     }));
 
-    return Promise.all(mapped.map(p => this.updateDeviceSpecs(p).catch(() => p)));
+    return mapped;
   }
 
   public async sendCommands(deviceId: string, commands: TuyaDeviceStatus[]): Promise<boolean> {
@@ -185,38 +185,6 @@ export class TuyaSharingAPI {
 
   public getUserId(): string {
     return this.tokenInfo.uid;
-  }
-
-  async queryHomes() {
-    const response = await this._request<[{ uid: string, id: number, ownerId: string, name: string }]>("GET", "/v1.0/m/life/users/homes");
-    return response?.result || [];
-  }
-
-  private async updateDeviceSpecs(device: TuyaDevice): Promise<TuyaDevice> {
-    const schemas = new Map<string, TuyaDeviceSchema>();
-
-    try {
-      const response = await this._request<{ status: TuyaDeviceFunction[], functions: TuyaDeviceFunction[] }>("get", `/v1.1/m/life/${device.id}/specifications`);
-
-      for (const { code, type, values } of [...response.result.status, ...response.result.functions]) {
-        const read = response.result.status.find(r => r.code == code);
-        const write = response.result.functions.find(f => f.code == code);
-        try {
-          schemas.set(code, {
-            code,
-            mode: !!read && !!write ? "rw" : !!write ? "w" : "r",
-            type: type as any,
-            specs: JSON.parse(values)
-          });
-        } catch {
-          continue;
-        }
-      }
-    } catch {
-      logDebug("specifications fetch failed", { deviceId: device.id, name: device.name });
-    }
-    device.schema = Array.from(schemas.values());
-    return device;
   }
 
   private getJarvisHost(): string {

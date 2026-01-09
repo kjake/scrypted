@@ -387,8 +387,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
       if (this.api instanceof TuyaSharingAPI) {
         const api = this.api;
         const fetch = async () => {
-          const homes = await api.queryHomes();
-          this.tuyaHomeIds = homes.map(h => h.ownerId);
+          this.tuyaHomeIds = [];
           return await api.fetchMqttConfig(this.tuyaHomeIds, devices.map(d => d.id));
         }
         this.mq = new TuyaMQ(fetch)
@@ -420,8 +419,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
       throw new Error("WebRTC signaling requires Tuya App login.");
     }
     if (!this.tuyaHomeIds.length) {
-      const homes = await this.api.queryHomes();
-      this.tuyaHomeIds = homes.map(h => h.ownerId);
+      this.tuyaHomeIds = [];
     }
 
     const webrtc = await this.api.getWebRTCConfig(deviceId);
