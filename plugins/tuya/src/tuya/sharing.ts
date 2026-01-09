@@ -71,39 +71,41 @@ export class TuyaSharingAPI {
     }
   }
 
-  public async fetchMqttConfig(homeIds: string[], deviceIds: string[]): Promise<MqttConfig> {
-    const linkId = "@scrypted/tuya." + randomUUID();
-    const response = await this._request<{
-      url: string,
-      clientId: string, 
-      username: string, 
-      password: string, 
-      expireTime: number, 
-      topic: { 
-        ownerId: {
-          pub: string,
-          sub: string 
-        }, 
-        devId: { sub: string } 
-      } 
-    }>(
-      "post",
-      "/v1.0/m/life/ha/access/config",
-      undefined,
-      { linkId }
-    );
+  public async fetchMqttConfig(_: string[], __: string[]): Promise<MqttConfig> {
+    const host = this.getJarvisHost();
+    const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
+    const response = await this.session.request({
+      method: "POST",
+      baseURL: `https://${host}`,
+      url: "/api/jarvis/mqtt",
+      data: "{}",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Accept: "*/*",
+        Origin: `https://${host}`,
+        Referer: `https://${host}/playback`,
+        "X-Requested-With": "XMLHttpRequest",
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+      },
+    });
 
-    if (!response.success) throw new Error("Failed to fetch MQTT Config");
+    console.log(`[TuyaSharing] mqttConfig status=${response.status}`);
+    console.log(`[TuyaSharing] mqttConfig responseCookies=${JSON.stringify(response.headers?.["set-cookie"] ?? [])}`);
+    console.log(`[TuyaSharing] mqttConfig responseRaw=${response.data}`);
+
+    const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
+    const result = raw?.result as { msid?: string; password?: string; mobileMqttsUrl?: string; mqttsUrl?: string; mqttUrl?: string; url?: string } | undefined;
+    if (!raw?.success || !result?.msid || !result?.password) {
+      throw new Error(raw?.errorMsg || "Failed to fetch MQTT Config");
+    }
 
     return {
-      url: response.result.url,
-      clientId: response.result.clientId,
-      username: response.result.username,
-      password: response.result.password,
-      topics: homeIds.map(id => response.result.topic.ownerId.sub.replace("{ownerId}", id))
-        .concat(deviceIds.map(id => response.result.topic.devId.sub.replace("{devId}", id) + "/sta")),
-      expires: (response.t ?? 0) + (response.result.expireTime ?? 0) * 1000
-    }
+      url: `wss://${result.mobileMqttsUrl ?? result.mqttsUrl ?? result.mqttUrl ?? result.url}/mqtt`,
+      clientId: `web_${result.msid}`,
+      username: `web_${result.msid}`,
+      password: result.password,
+      topics: [`/av/u/${result.msid}`],
+    };
   }
 
   public async getWebRTCConfig(deviceId: string): Promise<TuyaWebRtcConfig> {
