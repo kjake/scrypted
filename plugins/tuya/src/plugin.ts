@@ -219,7 +219,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
             this.onDeviceEvent(ScryptedInterface.Settings, undefined);
           } else if (loggedInClicked) {
             try {
-              const token = await TuyaSharingAPI.fetchToken(qrCodeValue);
+              const token = await TuyaSharingAPI.fetchToken(qrCodeValue, this.settingsStorage.values.country);
               storeToken = { type: TuyaLoginMethod.App, ...token };
               this.settingsStorage.settings.qrCode.defaultValue = undefined;
             } catch (e) {

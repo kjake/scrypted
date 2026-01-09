@@ -314,37 +314,56 @@ export class TuyaSharingAPI {
     return { userCode, ...data }
   }
 
-  static async fetchToken(qrCodeLogin: TuyaLoginQRCode): Promise<TuyaSharingTokenInfo> {
-    const session = new Axios({})
-    const response = await session.request({
-      method: "GET",
-      url: `https://apigw.iotbing.com/v1.0/m/life/home-assistant/qrcode/tokens/${qrCodeLogin.result.qrcode}`,
-      params: {
-        clientid: TuyaSharingAPI.clientId,
-        usercode: qrCodeLogin.userCode
-      },
-      headers: {}
-    });
-    const data = JSON.parse(response.data) as TuyaResponse<{
-      access_token: string;
-      refresh_token: string;
-      uid: string;
-      expire_time?: number;
-      terminal_id: string;
-      endpoint: string;
-      username: string;
-    }>;
-    if (!data.success) throw Error('Failed to fetch token from qr code.');
-    return {
-      userCode: qrCodeLogin.userCode,
-      uid: data.result.uid,
-      expires: (data.t ?? 0) + (data.result.expire_time ?? 0) * 1000,
-      accessToken: data.result.access_token,
-      refreshToken: data.result.refresh_token,
-      terminalId: data.result.terminal_id,
-      endpoint: data.result.endpoint,
-      username: data.result.username
-    };
+  static async fetchToken(qrCodeLogin: TuyaLoginQRCode, countryName?: string): Promise<TuyaSharingTokenInfo> {
+    const endpoint = getEndPointWithCountryName(countryName ?? "United States");
+    const host = new URL(endpoint).host;
+    const session = new Axios({ baseURL: `https://${host}` });
+    const payload = JSON.stringify({ token: qrCodeLogin.result.qrcode });
+
+    for (let i = 0; i < 60; i += 1) {
+      const response = await session.request({
+        method: "POST",
+        url: "/api/login/poll",
+        data: payload,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          Accept: "*/*",
+          Origin: `https://${host}`,
+          Referer: `https://${host}/login`,
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      });
+
+      const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
+      if (raw?.success && raw?.result) {
+        const result = raw.result as {
+          access_token?: string;
+          refresh_token?: string;
+          uid?: string;
+          expire_time?: number;
+          terminal_id?: string;
+          endpoint?: string;
+          username?: string;
+        };
+
+        if (result.access_token && result.refresh_token && result.uid) {
+          return {
+            userCode: qrCodeLogin.userCode,
+            uid: result.uid,
+            expires: (raw.t ?? 0) + (result.expire_time ?? 0) * 1000,
+            accessToken: result.access_token,
+            refreshToken: result.refresh_token,
+            terminalId: result.terminal_id ?? "",
+            endpoint: result.endpoint ?? endpoint,
+            username: result.username ?? "",
+          };
+        }
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    throw Error("Timed out waiting for QR code scan.");
   }
 }
 
