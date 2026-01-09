@@ -17,10 +17,6 @@ import { createHash, createPublicKey, publicEncrypt } from "node:crypto";
  */
 export type TuyaCloudTokenInfo = {
   uid: string;
-  expires: number;
-  accessToken: string;
-  refreshToken: string;
-
   country: string;
   clientId: string;
   clientSecret: string;
@@ -53,7 +49,7 @@ export class TuyaCloudAPI {
   }
 
   private get isSessionValid(): boolean {
-    return this.tokenInfo.expires > Date.now();
+    return true;
   }
 
   // Set Device Status
@@ -148,8 +144,6 @@ export class TuyaCloudAPI {
     query: { [k: string]: any } = {},
     body: { [k: string]: any } = {}
   ): Promise<TuyaResponse<T>> {
-    await this.refreshAccessTokenIfNeeded();
-
     const timestamp = Date.now().toString();
     const headers = { client_id: this.tokenInfo.clientId };
 
@@ -164,7 +158,6 @@ export class TuyaCloudAPI {
     const hashed = createHmac("sha256", this.tokenInfo.clientSecret);
     hashed.update(
       this.tokenInfo.clientId +
-      this.tokenInfo.accessToken +
       timestamp +
       this.nonce +
       stringToSign,
@@ -177,7 +170,7 @@ export class TuyaCloudAPI {
       sign: sign,
       sign_method: "HMAC-SHA256",
       t: timestamp,
-      access_token: this.tokenInfo.accessToken,
+      access_token: "",
       "Signature-Headers": Object.keys(headers).join(":"),
       nonce: this.nonce,
     };
@@ -197,47 +190,7 @@ export class TuyaCloudAPI {
       });
   }
 
-  private async refreshAccessTokenIfNeeded() {
-    if (this.isSessionValid) {
-      return;
-    }
-
-    const url = `/v1.0/token/${this.tokenInfo.refreshToken}`;
-
-    const timestamp = Date.now.toString();
-    const stringToSign = getStringToSign("GET", url);
-
-    const sign = createHmac('sha256', this.tokenInfo.clientSecret);
-    sign.update(this.tokenInfo.clientId + timestamp + stringToSign);
-
-    const signString = sign.digest('hex').toUpperCase();
-
-    const headers = {
-      t: timestamp,
-      sign_method: "HMAC-SHA256",
-      client_id: this.tokenInfo.clientId,
-      sign: signString,
-    };
-
-    let { data } = await this.client.get(url, { headers });
-
-    let response = JSON.parse(data) as TuyaResponse<{
-      access_token: string;
-      refresh_token: string;
-      expire_time: number;
-      uid: string;
-    }>;
-
-    if (!response.success) throw new Error(`Failed to generate access token. Reauthentication required.`);
-
-    this.tokenInfo = {
-      ...this.tokenInfo,
-      accessToken: response.result.access_token,
-      refreshToken: response.result.refresh_token,
-      expires: (response.t ?? 0) + (response.result.expire_time ?? 0) * 1000,
-      uid: response.result.uid
-    };
-  }
+  private async refreshAccessTokenIfNeeded() {}
 
   static async fetchToken(
     username?: string,
@@ -308,9 +261,6 @@ export class TuyaCloudAPI {
     const cookies = loginResponse.headers?.["set-cookie"];
     return {
       uid: loginRaw.result.uid,
-      expires: Date.now() + 24 * 60 * 60 * 1000,
-      accessToken: "",
-      refreshToken: "",
       country,
       clientId: loginRaw.result.clientId ?? "",
       clientSecret: "",

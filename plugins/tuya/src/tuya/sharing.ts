@@ -8,9 +8,6 @@ import { MqttConfig } from "./mq";
 export type TuyaSharingTokenInfo = {
   userCode: string;
   uid: string;
-  accessToken: string;
-  refreshToken: string;
-  expires: number;
   terminalId: string;
   username: string;
   endpoint: string;
@@ -27,7 +24,6 @@ export class TuyaSharingAPI {
   private tokenInfo: TuyaSharingTokenInfo;
   private updateToken: (token: TuyaSharingTokenInfo) => void;
   private requiresReauthentication: () => void;
-  private updatingTokenPromise: Promise<void> | null = null;
 
   constructor(
     initialTokenInfo: TuyaSharingTokenInfo,
@@ -174,10 +170,9 @@ export class TuyaSharingAPI {
 
   private async jarvisRequest<T = any>(host: string, path: string, data: Record<string, any>): Promise<T> {
     const url = `https://${host}${path}`;
-    const accessTokenValid = this.tokenInfo.expires > Date.now();
     console.log(`[TuyaSharing] jarvisRequest url=${url}`);
     console.log(`[TuyaSharing] jarvisRequest payload=${JSON.stringify(data)}`);
-    console.log(`[TuyaSharing] jarvisRequest authHeader=${Boolean(this.tokenInfo.accessToken)} accessTokenValid=${accessTokenValid}`);
+    console.log(`[TuyaSharing] jarvisRequest authHeader=false accessTokenValid=false`);
     const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
     const response = await this.session.request({
       method: "POST",
@@ -190,7 +185,6 @@ export class TuyaSharingAPI {
         Origin: `https://${host}`,
         Referer: `https://${host}/playback`,
         "X-Requested-With": "XMLHttpRequest",
-        Authorization: `Bearer ${this.tokenInfo.accessToken}`,
         ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
     });
@@ -211,12 +205,10 @@ export class TuyaSharingAPI {
     body?: { [k: string]: any },
     skipRefreshToken?: boolean
   ): Promise<TuyaResponse<T>> {
-    if (!skipRefreshToken) await this.refreshTokenIfNeeded();
-
     const rid = randomUUID();
     const sid = "";
     const md5 = createHash("md5");
-    const ridRefreshToken = rid + this.tokenInfo.refreshToken;
+    const ridRefreshToken = rid;
     md5.update(ridRefreshToken, "utf-8");
     const hashKey = md5.digest("hex");
     const secret = _secretGenerating(rid, sid, hashKey);
@@ -240,7 +232,6 @@ export class TuyaSharingAPI {
     headers.set("X-requestId", rid)
     headers.set("X-sid", sid)
     headers.set("X-time", t.toString())
-    headers.set("X-token", this.tokenInfo.accessToken)
     headers.set("X-sign", _restfulSign(hashKey, queryEncData, bodyEncData, headers));
 
     const response = await this.session.request({
@@ -260,38 +251,7 @@ export class TuyaSharingAPI {
     };
   }
 
-  private async refreshTokenIfNeeded() {
-    if (this.updatingTokenPromise) {
-      await this.updatingTokenPromise;
-    } else {
-      this.updatingTokenPromise = this._internalRefreshTokenIfNeeded().finally(() => this.updatingTokenPromise = null);
-      await this.updatingTokenPromise;
-    }
-  }
-
-  private async _internalRefreshTokenIfNeeded() {
-    if (this.tokenInfo.expires > Date.now()) return;
-
-    const response = await this._request<{
-      accessToken: string;
-      refreshToken: string;
-      uid: string;
-      expireTime?: number;
-    }>("GET", `/v1.0/m/token/${this.tokenInfo.refreshToken}`, undefined, undefined, true);
-
-    if (!response.success) {
-      this.requiresReauthentication();
-      throw Error(`Failed to get new refesh token. Requires reauthentcation.`);
-    }
-
-    this.tokenInfo = {
-      ...this.tokenInfo,
-      expires: (response.t ?? 0) + (response.result.expireTime ?? 0) * 1000,
-      accessToken: response.result.accessToken,
-      refreshToken: response.result.refreshToken
-    };
-    this.updateToken(this.tokenInfo);
-  }
+  private async refreshTokenIfNeeded() {}
 
   static async generateQRCode(userCode: string, countryName?: string): Promise<TuyaLoginQRCode> {
     const endpoint = getEndPointWithCountryName(countryName ?? "United States");
@@ -362,9 +322,6 @@ export class TuyaSharingAPI {
           return {
             userCode: qrCodeLogin.userCode,
             uid: result.uid,
-            expires: raw.t ?? Date.now(),
-            accessToken: "",
-            refreshToken: "",
             terminalId: result.sid ?? "",
             endpoint: result.domain?.mobileApiUrl ?? endpoint,
             username: result.username ?? result.email ?? "",
