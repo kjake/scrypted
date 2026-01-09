@@ -13,6 +13,7 @@ export type TuyaSharingTokenInfo = {
   endpoint: string;
   cookies?: string[];
   email?: string;
+  country?: string;
 }
 
 export type TuyaLoginQRCode = { userCode: string } & TuyaResponse<{ qrcode: string }>
@@ -156,14 +157,15 @@ export class TuyaSharingAPI {
   }
 
   private getJarvisHost(): string {
-    console.log(`[TuyaSharing] tokenInfo.endpoint=${this.tokenInfo.endpoint}`);
+    const endpoint = getEndPointWithCountryName(this.tokenInfo.country ?? "United States");
+    console.log(`[TuyaSharing] jarvisEndpoint=${endpoint}`);
     try {
-      const host = new URL(this.tokenInfo.endpoint).host;
+      const host = new URL(endpoint).host;
       console.log(`[TuyaSharing] jarvisHost=${host}`);
       console.log(`[TuyaSharing] jarvisUrl=https://${host}/api/jarvis/config`);
       return host;
     } catch {
-      const host = this.tokenInfo.endpoint.replace(/^https?:\/\//, "");
+      const host = endpoint.replace(/^https?:\/\//, "");
       console.log(`[TuyaSharing] jarvisHost=${host}`);
       console.log(`[TuyaSharing] jarvisUrl=https://${host}/api/jarvis/config`);
       return host;
@@ -337,6 +339,7 @@ export class TuyaSharingAPI {
             username: result.username ?? result.email ?? "",
             cookies: Array.isArray(cookies) ? cookies : cookies ? [cookies] : [],
             email: result.email,
+            country: countryName,
           };
         }
       }
