@@ -2,6 +2,7 @@ import { Axios, Method } from "axios";
 import { RTSPToken, TuyaDevice, TuyaDeviceFunction, TuyaDeviceSchema, TuyaDeviceStatus, TuyaResponse } from "./const";
 import { TuyaWebRtcConfig } from "./webrtc";
 import { getEndPointWithCountryName } from "./deprecated";
+import { isCameraCategory } from "../discovery/cameraCategories";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomInt, randomUUID } from "node:crypto";
 import { MqttConfig } from "./mq";
 
@@ -41,12 +42,91 @@ export class TuyaSharingAPI {
   }
 
   public async fetchDevices(): Promise<TuyaDevice[]> {
-    const homes = await this.queryHomes();
-    const firstHomeId = homes.at(0)?.ownerId;
-    if (!firstHomeId) return [];
-    const devicesResponse = await this._request<TuyaDevice[]>("GET", "/v1.0/m/life/ha/home/devices", { homeId: firstHomeId });
-    return Promise.all((devicesResponse.result || [])
-      .map(p => this.updateDeviceSpecs(p).catch(() => p)));
+    const host = this.getJarvisHost();
+    const cookieHeader = this.tokenInfo.cookies?.length ? this.tokenInfo.cookies.join("; ") : undefined;
+    const headers = {
+      "Content-Type": "application/json; charset=utf-8",
+      Accept: "*/*",
+      Origin: `https://${host}`,
+      Referer: `https://${host}/playback`,
+      "X-Requested-With": "XMLHttpRequest",
+      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+    };
+
+    const jarvisPost = async <T>(path: string, data?: Record<string, any>) => {
+      const response = await this.session.request({
+        method: "POST",
+        baseURL: `https://${host}`,
+        url: path,
+        data: data ? JSON.stringify(data) : undefined,
+        headers,
+      });
+      const raw = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
+      if (!raw?.success) {
+        throw new Error(raw?.errorMsg || `Jarvis request failed: ${path}`);
+      }
+      return raw.result as T;
+    };
+
+    const devices: {
+      deviceId: string;
+      deviceName: string;
+      category: string;
+      productId?: string;
+      uuid?: string;
+    }[] = [];
+
+    const homes = await jarvisPost<{ gid: number }[]>("/api/new/common/homeList");
+    for (const home of homes ?? []) {
+      const rooms = await jarvisPost<{ deviceList?: typeof devices }[]>("/api/new/common/roomList", {
+        homeId: String(home.gid),
+      });
+      for (const room of rooms ?? []) {
+        for (const device of room.deviceList ?? []) {
+          if (!device?.deviceId || !device.category) continue;
+          if (!isCameraCategory(device.category)) continue;
+          if (!devices.find(d => d.deviceId === device.deviceId)) {
+            devices.push(device);
+          }
+        }
+      }
+    }
+
+    const shared = await jarvisPost<{ securityWebCShareInfoList?: { deviceInfoList?: typeof devices }[] }>("/api/new/playback/shareList");
+    for (const sharedHome of shared?.securityWebCShareInfoList ?? []) {
+      for (const device of sharedHome.deviceInfoList ?? []) {
+        if (!device?.deviceId || !device.category) continue;
+        if (!isCameraCategory(device.category)) continue;
+        if (!devices.find(d => d.deviceId === device.deviceId)) {
+          devices.push(device);
+        }
+      }
+    }
+
+    const mapped = devices.map((device) => ({
+      id: device.deviceId,
+      name: device.deviceName,
+      local_key: "",
+      category: device.category,
+      product_id: device.productId ?? "",
+      product_name: device.productId ?? "",
+      sub: false,
+      uuid: device.uuid ?? "",
+      online: true,
+      icon: "",
+      ip: "",
+      time_zone: "",
+      active_time: 0,
+      create_time: 0,
+      update_time: 0,
+      status: [],
+      schema: [],
+      uid: this.tokenInfo.uid,
+      biz_type: 0,
+      owner_id: "",
+    }));
+
+    return Promise.all(mapped.map(p => this.updateDeviceSpecs(p).catch(() => p)));
   }
 
   public async sendCommands(deviceId: string, commands: TuyaDeviceStatus[]): Promise<boolean> {
