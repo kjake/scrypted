@@ -2,6 +2,7 @@ import { getBackoffMs } from "./backoff";
 import { DiscoveryRegistry } from "./registry";
 import { DiscoveryState, FailureInfo } from "./types";
 import { RtspValidator } from "./rtspValidator";
+import { isCameraCategory } from "./cameraCategories";
 
 export type StreamUrlProvider = (devId: string) => Promise<string>;
 
@@ -51,11 +52,9 @@ export class DiscoveryController {
     if (this.options.probeAllCategories) return true;
 
     // Default: probe only camera-likely categories to avoid hammering Tuya for non-camera devices.
-    const defaults = ["sp", "sp_wnq", "dghsxj", "pettv"];
-    const allow = new Set<string>([...defaults, ...(this.options.cameraCategories ?? [])]);
-
     const category = record.identity?.category;
-    return typeof category === "string" && allow.has(category);
+    if (typeof category !== "string") return false;
+    return isCameraCategory(category, this.options.cameraCategories ?? []);
   }
 
   scheduleProbe(devId: string, options: { immediate?: boolean; force?: boolean } = {}): void {

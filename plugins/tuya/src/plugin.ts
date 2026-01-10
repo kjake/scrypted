@@ -24,6 +24,7 @@ import { DiscoveryController } from "./discovery/controller";
 import { DiscoveryRegistry } from "./discovery/registry";
 import { DiscoveryState } from "./discovery/types";
 import { NetRtspValidator } from "./discovery/rtspValidator";
+import { TuyaWebRtcSignalingConfig } from "./tuya/webrtc";
 
 const DISCOVERY_GROUP = "Camera Discovery";
 const DISCOVERY_SELECTED_STORAGE_KEY = "tuya.discovery.selected";
@@ -41,6 +42,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
   mq: TuyaMQ | undefined;
   devices = new Map<string, TuyaAccessory>();
   tuyaDevices = new Map<string, TuyaDevice>();
+  tuyaHomeIds: string[] = [];
   discoveryRegistry = new DiscoveryRegistry(this.storage);
   discoveryController: DiscoveryController | undefined;
   private discoveryChoiceMap = new Map<string, string>();
@@ -84,20 +86,21 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
 
     // Old development account config
     userId: {
-      title: "User ID",
+      title: "Email/Phone",
       type: 'string',
-      description: "Required: You can find this information in Tuya IoT -> Cloud -> Devices -> Linked Devices.",
+      description: "Required: The email address or phone number for your Tuya account.",
       onPut: () => this.tryLogin()
     },
     accessId: {
-      title: "Access ID",
+      title: "Legacy Access ID (unused)",
       type: 'string',
-      description: "Requirerd: This is located on the main project.",
+      description: "Deprecated: No longer required for account login.",
+      hide: true,
       onPut: () => this.tryLogin()
     },
     accessKey: {
-      title: "Access Key/Secret",
-      description: "Requirerd: This is located on the main project.",
+      title: "Password",
+      description: "Required: Tuya account password.",
       type: "password",
       onPut: () => this.tryLogin()
     },
@@ -152,7 +155,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
 
     // Show old login method
     this.settingsStorage.settings.userId.hide = loginMethod != TuyaLoginMethod.Account;
-    this.settingsStorage.settings.accessId.hide = loginMethod != TuyaLoginMethod.Account;
+    this.settingsStorage.settings.accessId.hide = true;
     this.settingsStorage.settings.accessKey.hide = loginMethod != TuyaLoginMethod.Account;
     this.settingsStorage.settings.country.hide = loginMethod != TuyaLoginMethod.Account;
     this.settingsStorage.settings.loggedIn.hide = !tokenInfo;
@@ -209,7 +212,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
           } else if (!qrCodeValue || qrCodeValue.userCode != userCode) {
             this.settingsStorage.settings.qrCode.defaultValue = undefined;
             try {
-              const qrCode = await TuyaSharingAPI.generateQRCode(userCode);
+              const qrCode = await TuyaSharingAPI.generateQRCode(userCode, this.settingsStorage.values.country);
               this.settingsStorage.settings.qrCode.defaultValue = qrCode;
             } catch (e) {
               this.console.log(`[${this.name}] (${new Date().toLocaleString()}) Failed to fetch new QR Code.`, e);
@@ -217,7 +220,7 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
             this.onDeviceEvent(ScryptedInterface.Settings, undefined);
           } else if (loggedInClicked) {
             try {
-              const token = await TuyaSharingAPI.fetchToken(qrCodeValue);
+              const token = await TuyaSharingAPI.fetchToken(qrCodeValue, this.settingsStorage.values.country);
               storeToken = { type: TuyaLoginMethod.App, ...token };
               this.settingsStorage.settings.qrCode.defaultValue = undefined;
             } catch (e) {
@@ -231,7 +234,6 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
           try {
             const token = await TuyaCloudAPI.fetchToken(
               this.settingsStorage.values.userId,
-              this.settingsStorage.values.accessId,
               this.settingsStorage.values.accessKey,
               this.settingsStorage.values.country
             )
@@ -384,9 +386,9 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     try {
       if (this.api instanceof TuyaSharingAPI) {
         const api = this.api;
-        const fetch = async function() {
-          const homes = await api.queryHomes();
-          return await api.fetchMqttConfig(homes.map(h => h.ownerId), devices.map(d => d.id));
+        const fetch = async () => {
+          this.tuyaHomeIds = [];
+          return await api.fetchMqttConfig(this.tuyaHomeIds, devices.map(d => d.id));
         }
         this.mq = new TuyaMQ(fetch)
         this.mq.on("message", (mq, msg) => {
@@ -407,6 +409,33 @@ export class TuyaPlugin extends ScryptedDeviceBase implements DeviceProvider, Se
     } catch {
       this.console.log(`[${this.name}] (${new Date().toLocaleString()}) Failed to connect to Mqtt. Will not observe live changes to devices.`);
     }
+  }
+
+  async getWebRTCSignalingConfig(deviceId: string): Promise<TuyaWebRtcSignalingConfig> {
+    if (!this.api) {
+      throw new Error("Not authenticated with Tuya.");
+    }
+    if (!(this.api instanceof TuyaSharingAPI)) {
+      throw new Error("WebRTC signaling requires Tuya App login.");
+    }
+    if (!this.tuyaHomeIds.length) {
+      this.tuyaHomeIds = [];
+    }
+
+    const webrtc = await this.api.getWebRTCConfig(deviceId);
+    const mqttConfig = await this.api.fetchMqttConfig(this.tuyaHomeIds, [deviceId]);
+
+    return {
+      deviceId,
+      webrtc,
+      mqtt: {
+        url: mqttConfig.url,
+        clientId: mqttConfig.clientId,
+        username: mqttConfig.username,
+        password: mqttConfig.password,
+        uid: this.api.getUserId(),
+      },
+    };
   }
 
   private getDiscoverySettings(): Setting[] {

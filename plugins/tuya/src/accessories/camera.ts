@@ -17,9 +17,16 @@ import sdk, {
   Device,
   ScryptedDeviceType,
   ScryptedInterface,
+  RTCAVSignalingSetup,
+  RTCSessionControl,
+  RTCSignalingChannel,
+  RTCSignalingOptions,
+  RTCSignalingSendIceCandidate,
+  RTCSignalingSession,
 } from "@scrypted/sdk";
 import { TuyaAccessory } from "./accessory";
 import { TuyaDeviceStatus } from "../tuya/const";
+import { TuyaWebRtcSignalingClient } from "../tuya/webrtc";
 
 // TODO: Allow setting motion info based on dp name?
 const SCHEMA_CODE = {
@@ -36,7 +43,119 @@ const SCHEMA_CODE = {
   INDICATOR: ["basic_indicator"]
 };
 
-export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCamera, BinarySensor, MotionSensor, OnOff {
+class TuyaRTCSessionControl implements RTCSessionControl {
+  constructor(private signaling: TuyaWebRtcSignalingClient) {}
+
+  async setPlayback(_: { audio: boolean; video: boolean }): Promise<void> {}
+
+  async getRefreshAt(): Promise<number | void> {
+    return undefined;
+  }
+
+  async extendSession(): Promise<void> {}
+
+  async endSession(): Promise<void> {
+    await this.signaling.disconnect();
+  }
+}
+
+function createTuyaOfferSetup(iceServers: RTCIceServer[]): RTCAVSignalingSetup {
+  return {
+    type: "offer",
+    configuration: {
+      iceServers,
+    },
+    audio: {
+      direction: "recvonly",
+    },
+    video: {
+      direction: "recvonly",
+    },
+  };
+}
+
+function logSendCandidate(console: Console, type: string, session: RTCSignalingSession): RTCSignalingSendIceCandidate {
+  return async (candidate) => {
+    try {
+      console.log?.(`${type} trickled candidate:`, candidate.sdpMLineIndex, candidate.candidate);
+      await session.addIceCandidate(candidate);
+    } catch (e) {
+      console.error?.("addIceCandidate error", e);
+      throw e;
+    }
+  };
+}
+
+function createCandidateQueue(console: Console, type: string, session: RTCSignalingSession) {
+  let ready = false;
+  let candidateQueue: RTCIceCandidateInit[] = [];
+  const sendCandidate = logSendCandidate(console, type, session);
+  const queueSendCandidate: RTCSignalingSendIceCandidate = async (candidate: RTCIceCandidateInit) => {
+    if (!ready) {
+      candidateQueue.push(candidate);
+    } else {
+      await sendCandidate(candidate);
+    }
+  };
+
+  return {
+    flush() {
+      ready = true;
+      for (const candidate of candidateQueue) {
+        void sendCandidate(candidate);
+      }
+      candidateQueue = [];
+    },
+    queueSendCandidate,
+  };
+}
+
+async function getSignalingSessionOptions(session: RTCSignalingSession) {
+  return typeof session.options === "object" ? session.options : await session.getOptions();
+}
+
+async function connectRTCSignalingClients(
+  console: Console,
+  offerClient: RTCSignalingSession,
+  offerSetup: Partial<RTCAVSignalingSetup>,
+  answerClient: RTCSignalingSession,
+  answerSetup: Partial<RTCAVSignalingSetup>
+) {
+  const offerOptions = await getSignalingSessionOptions(offerClient);
+  const answerOptions = await getSignalingSessionOptions(answerClient);
+  const disableTrickle = offerOptions?.disableTrickle || answerOptions?.disableTrickle;
+
+  if (offerOptions?.offer && answerOptions?.offer) {
+    throw new Error("Both RTC clients have offers and can not negotiate.");
+  }
+
+  if (offerOptions?.requiresOffer && answerOptions?.requiresOffer) {
+    throw new Error("Both RTC clients require offers and can not negotiate.");
+  }
+
+  offerSetup.type = "offer";
+  answerSetup.type = "answer";
+
+  const answerQueue = createCandidateQueue(console, "offer", answerClient);
+  const offerQueue = createCandidateQueue(console, "answer", offerClient);
+
+  const offer = await offerClient.createLocalDescription(
+    "offer",
+    offerSetup as RTCAVSignalingSetup,
+    disableTrickle ? undefined : answerQueue.queueSendCandidate
+  );
+  await answerClient.setRemoteDescription(offer, answerSetup as RTCAVSignalingSetup);
+  const answer = await answerClient.createLocalDescription(
+    "answer",
+    answerSetup as RTCAVSignalingSetup,
+    disableTrickle ? undefined : offerQueue.queueSendCandidate
+  );
+  await offerClient.setRemoteDescription(answer, offerSetup as RTCAVSignalingSetup);
+  offerQueue.flush();
+  answerQueue.flush();
+}
+
+export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCamera, BinarySensor, MotionSensor, OnOff, RTCSignalingChannel {
   private lightAccessory: ScryptedDeviceBase | undefined;
 
   get deviceSpecs(): Device {
@@ -51,6 +170,7 @@ export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCa
         ...super.deviceSpecs.interfaces,
         ScryptedInterface.VideoCamera,
         ScryptedInterface.DeviceProvider,
+        ScryptedInterface.RTCSignalingChannel,
         indicatorSchema ? ScryptedInterface.OnOff : null,
         motionSchema ? ScryptedInterface.MotionSensor : null,
         doorbellSchema ? ScryptedInterface.BinarySensor : null,
@@ -124,6 +244,100 @@ export class TuyaCamera extends TuyaAccessory implements DeviceProvider, VideoCa
         tool: "ffmpeg",
       },
     ];
+  }
+
+  async startRTCSignalingSession(session: RTCSignalingSession): Promise<RTCSessionControl> {
+    if (!this.tuyaDevice.online) {
+      throw new Error(`Failed to stream ${this.name}: Camera is offline.`);
+    }
+
+    const signalingConfig = await this.plugin.getWebRTCSignalingConfig(this.tuyaDevice.id);
+    const signaling = new TuyaWebRtcSignalingClient(signalingConfig);
+    await signaling.connect();
+
+    let answerSdp = "";
+    let answerResolve: ((sdp: string) => void) | undefined;
+    let answerReject: ((error: Error) => void) | undefined;
+
+    const answerPromise = new Promise<string>((resolve, reject) => {
+      answerResolve = resolve;
+      answerReject = reject;
+    });
+
+    const options: RTCSignalingOptions = {
+      requiresOffer: true,
+      disableTrickle: false,
+    };
+
+    signaling.onAnswer = (answer) => {
+      answerResolve?.(answer.sdp);
+    };
+    signaling.onDisconnect = () => {
+      answerReject?.(new Error("Tuya signaling session ended."));
+    };
+    signaling.onError = (error) => {
+      answerReject?.(error);
+    };
+
+    const tuyaSession: RTCSignalingSession = {
+      __proxy_props: {
+        options,
+      },
+      options,
+      createLocalDescription: async (
+        type: "offer" | "answer",
+        _: RTCAVSignalingSetup,
+        sendIceCandidate?: RTCSignalingSendIceCandidate
+      ): Promise<RTCSessionDescriptionInit> => {
+        if (type !== "answer") {
+          throw new Error("Tuya cameras only support RTC answer.");
+        }
+
+        if (sendIceCandidate) {
+          signaling.onCandidate = (candidate) => {
+            sendIceCandidate({
+              candidate: candidate.candidate,
+              sdpMid: "0",
+              sdpMLineIndex: 0,
+            });
+          };
+        }
+
+        return {
+          type: "answer",
+          sdp: answerSdp,
+        };
+      },
+      setRemoteDescription: async (description: RTCSessionDescriptionInit) => {
+        if (!description.sdp) {
+          throw new Error("Missing RTC offer for Tuya WebRTC session.");
+        }
+
+        await signaling.sendOffer(description.sdp);
+        answerSdp = await answerPromise;
+      },
+      addIceCandidate: async (candidate: RTCIceCandidateInit) => {
+        if (!candidate.candidate) return;
+        await signaling.sendCandidate(candidate.candidate);
+      },
+      getOptions: async () => options,
+    };
+
+    const iceServers = signalingConfig.webrtc.p2pConfig.ices.map((ice) => ({
+      urls: ice.urls,
+      username: ice.username,
+      credential: ice.credential,
+    }));
+
+    await connectRTCSignalingClients(
+      this.console,
+      session,
+      createTuyaOfferSetup(iceServers),
+      tuyaSession,
+      {}
+    );
+
+    return new TuyaRTCSessionControl(signaling);
   }
 
   async updateStatus(status: TuyaDeviceStatus[]): Promise<void> {

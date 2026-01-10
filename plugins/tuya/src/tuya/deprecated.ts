@@ -763,10 +763,10 @@ export function getEndPointWithCountryName(name: string) {
  * @deprecated Will eventually be removed in favor of Sharing SDK
  */
 export function getTuyaCloudEndpoint<T extends { endpointGroup: EndpointGroup }>(country: T): string {
-  const AMERICA = "https://openapi.tuyaus.com";
-  const EUROPE = "https://openapi.tuyaeu.com";
-  const INDIA = "https://openapi.tuyain.com";
-  const CHINA = "https://openapi.tuyacn.com";
+  const AMERICA = "https://protect-us.ismartlife.me";
+  const EUROPE = "https://protect-eu.ismartlife.me";
+  const INDIA = "https://protect-in.ismartlife.me";
+  const CHINA = "https://protect.ismartlife.me";
 
   switch (country.endpointGroup) {
     case EndpointGroup.America:

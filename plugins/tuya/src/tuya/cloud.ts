@@ -1,5 +1,4 @@
 import { Axios, Method } from "axios";
-import { getEndPointWithCountryName } from "./deprecated";
 import {
   TuyaDeviceStatus,
   RTSPToken,
@@ -8,20 +7,21 @@ import {
   TuyaDeviceFunction,
   TuyaDeviceSchema
 } from "./const";
+import { TuyaWebRtcConfig } from "./webrtc";
+import { getEndPointWithCountryName } from "./deprecated";
 import { randomBytes, createHmac, hash } from "node:crypto";
+import { createHash, createPublicKey, publicEncrypt } from "node:crypto";
+import { logDebug } from "./debug";
 
 /**
  * @deprecated Will eventually be removed in favor of Sharing SDK
  */
 export type TuyaCloudTokenInfo = {
   uid: string;
-  expires: number;
-  accessToken: string;
-  refreshToken: string;
-
   country: string;
   clientId: string;
   clientSecret: string;
+  cookies?: string[];
 }
 
 /**
@@ -50,7 +50,7 @@ export class TuyaCloudAPI {
   }
 
   private get isSessionValid(): boolean {
-    return this.tokenInfo.expires > Date.now();
+    return true;
   }
 
   // Set Device Status
@@ -133,6 +133,10 @@ export class TuyaCloudAPI {
     }
   }
 
+  public async getWebRTCConfig(_: string): Promise<TuyaWebRtcConfig> {
+    throw new Error("WebRTC signaling is not available for the Tuya developer account login.");
+  }
+
   // Tuya IoT Cloud Requests API
 
   private async _request<T = any>(
@@ -141,8 +145,6 @@ export class TuyaCloudAPI {
     query: { [k: string]: any } = {},
     body: { [k: string]: any } = {}
   ): Promise<TuyaResponse<T>> {
-    await this.refreshAccessTokenIfNeeded();
-
     const timestamp = Date.now().toString();
     const headers = { client_id: this.tokenInfo.clientId };
 
@@ -157,7 +159,6 @@ export class TuyaCloudAPI {
     const hashed = createHmac("sha256", this.tokenInfo.clientSecret);
     hashed.update(
       this.tokenInfo.clientId +
-      this.tokenInfo.accessToken +
       timestamp +
       this.nonce +
       stringToSign,
@@ -170,11 +171,12 @@ export class TuyaCloudAPI {
       sign: sign,
       sign_method: "HMAC-SHA256",
       t: timestamp,
-      access_token: this.tokenInfo.accessToken,
+      access_token: "",
       "Signature-Headers": Object.keys(headers).join(":"),
       nonce: this.nonce,
     };
 
+    logDebug("cloudRequest", { method, path, query, body });
     return this.client
       .request<TuyaResponse<T>>({
         method,
@@ -186,60 +188,101 @@ export class TuyaCloudAPI {
         transformResponse: (data) => JSON.parse(data),
       })
       .then((value) => {
+        logDebug("cloudResponse", { path, data: value.data });
         return value.data;
       });
   }
 
-  private async refreshAccessTokenIfNeeded() {
-    if (this.isSessionValid) {
-      return;
-    }
-
-    const url = `/v1.0/token/${this.tokenInfo.refreshToken}`;
-
-    const timestamp = Date.now.toString();
-    const stringToSign = getStringToSign("GET", url);
-
-    const sign = createHmac('sha256', this.tokenInfo.clientSecret);
-    sign.update(this.tokenInfo.clientId + timestamp + stringToSign);
-
-    const signString = sign.digest('hex').toUpperCase();
-
-    const headers = {
-      t: timestamp,
-      sign_method: "HMAC-SHA256",
-      client_id: this.tokenInfo.clientId,
-      sign: signString,
-    };
-
-    let { data } = await this.client.get(url, { headers });
-
-    let response = JSON.parse(data) as TuyaResponse<{
-      access_token: string;
-      refresh_token: string;
-      expire_time: number;
-      uid: string;
-    }>;
-
-    if (!response.success) throw new Error(`Failed to generate access token. Reauthentication required.`);
-
-    this.tokenInfo = {
-      ...this.tokenInfo,
-      accessToken: response.result.access_token,
-      refreshToken: response.result.refresh_token,
-      expires: (response.t ?? 0) + (response.result.expire_time ?? 0) * 1000,
-      uid: response.result.uid
-    };
-  }
+  private async refreshAccessTokenIfNeeded() {}
 
   static async fetchToken(
-    userId?: string,
-    clientId?: string,
-    clientSecret?: string,
+    username?: string,
+    password?: string,
     country?: string
   ): Promise<TuyaCloudTokenInfo> {
-    if (!userId || !clientId || !clientSecret || !country) throw Error('Missing credential information.');
-    return Promise.reject();
+    if (!username || !password || !country) throw Error('Missing credential information.');
+    const endpoint = getEndPointWithCountryName(country);
+    const host = new URL(endpoint).host;
+    const session = new Axios({ baseURL: `https://${host}` });
+    logDebug("cloud login start", { username, country, host });
+
+    const tokenPayload = {
+      countryCode: country,
+      username,
+      isUid: false,
+    };
+    logDebug("cloud login tokenRequest", tokenPayload);
+    const tokenResponse = await session.request({
+      method: "POST",
+      url: "/api/login/token",
+      data: JSON.stringify(tokenPayload),
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Accept: "*/*",
+        Origin: `https://${host}`,
+        Referer: `https://${host}/login`,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+    });
+
+    logDebug("cloud login tokenResponse", {
+      status: tokenResponse.status,
+      cookies: tokenResponse.headers?.["set-cookie"] ?? [],
+      raw: tokenResponse.data,
+    });
+    const tokenPayloadResponse = typeof tokenResponse.data === "string" ? JSON.parse(tokenResponse.data) : tokenResponse.data;
+    if (!tokenPayloadResponse?.success || !tokenPayloadResponse?.result?.token || !tokenPayloadResponse?.result?.pbKey) {
+      throw new Error(tokenPayloadResponse?.errorMsg || "Failed to fetch login token.");
+    }
+
+    const hashedPassword = createHash("md5").update(password).digest("hex");
+    const publicKey = createPublicKey({
+      key: `-----BEGIN PUBLIC KEY-----\n${tokenPayloadResponse.result.pbKey}\n-----END PUBLIC KEY-----`,
+      format: "pem",
+    });
+    const encryptedPassword = publicEncrypt(publicKey, Buffer.from(hashedPassword)).toString("hex");
+
+    const loginPayload = {
+      countryCode: country,
+      passwd: encryptedPassword,
+      token: tokenPayloadResponse.result.token,
+      ifencrypt: 1,
+      options: "{\"group\":1}",
+      ...(username.includes("@") ? { email: username } : { mobile: username }),
+    };
+    logDebug("cloud login payload", loginPayload);
+
+    const loginResponse = await session.request({
+      method: "POST",
+      url: username.includes("@") ? "/api/private/email/login" : "/api/private/phone/login",
+      data: JSON.stringify(loginPayload),
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Accept: "*/*",
+        Origin: `https://${host}`,
+        Referer: `https://${host}/login`,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+    });
+
+    const loginRaw = typeof loginResponse.data === "string" ? JSON.parse(loginResponse.data) : loginResponse.data;
+    logDebug("cloud login response", {
+      status: loginResponse.status,
+      cookies: loginResponse.headers?.["set-cookie"] ?? [],
+      raw: loginResponse.data,
+    });
+    if (!loginRaw?.success || !loginRaw?.result?.uid) {
+      throw new Error(loginRaw?.errorMsg || "Failed to login with credentials.");
+    }
+
+    const cookies = loginResponse.headers?.["set-cookie"];
+    return {
+      uid: loginRaw.result.uid,
+      country,
+      clientId: loginRaw.result.clientId ?? "",
+      clientSecret: "",
+      cookies: Array.isArray(cookies) ? cookies : cookies ? [cookies] : [],
+    };
   }
 }
 

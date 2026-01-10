@@ -4,14 +4,11 @@ import { TuyaDevice, TuyaDeviceStatus } from "../tuya/const";
 
 import { TuyaAccessory } from "./accessory";
 import { TuyaCamera } from "./camera";
+import { isCameraCategory } from "../discovery/cameraCategories";
 
 export function createTuyaDevice(state: TuyaDevice, plugin: TuyaPlugin): TuyaAccessory | null {
-  switch (state.category) {
-    case "sp":
-    case "dghsxj":
-    case "sp_wnq":
-    case "pettv":  
-      return new TuyaCamera(state, plugin)
-    default: return null;
+  if (isCameraCategory(state.category)) {
+    return new TuyaCamera(state, plugin);
   }
+  return null;
 }
